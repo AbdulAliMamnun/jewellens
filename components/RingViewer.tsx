@@ -9,8 +9,12 @@ import {
   type ReactNode,
 } from "react";
 
+import * as THREE from "three";
+
 import ViewerShell from "@/components/ViewerShell";
+import type { PartState } from "@/lib/archive-parts";
 import { filesFromDrop } from "@/lib/file-drop";
+import { STONE_APPEARANCE } from "@/lib/stone-look";
 import {
   DEFAULT_METAL,
   METAL_PRESETS,
@@ -55,6 +59,14 @@ export interface RingViewerProps {
    * folders. Supplying this switches drops from single-file to multi-file.
    */
   onFiles?: (files: File[]) => void;
+  /** Per-part visibility, material and scale. Falls back to whole-model metal. */
+  partStates?: Record<string, PartState>;
+  /** Whole-piece scale, e.g. after a ring resize. */
+  modelScale?: number;
+  /** Called when the metal chips are used in controlled mode. */
+  onMetalChange?: (metal: MetalId) => void;
+  /** Extra chrome below the metal chips, e.g. the archive chat. */
+  footerExtra?: ReactNode;
 }
 
 type ModelSource =
@@ -82,6 +94,10 @@ export default function RingViewer({
   busy,
   notice,
   onFiles,
+  partStates,
+  modelScale = 1,
+  onMetalChange,
+  footerExtra,
 }: RingViewerProps) {
   const isControlled = controlledModel !== undefined;
   const [dropped, setDropped] = useState<{
@@ -233,7 +249,16 @@ export default function RingViewer({
     <ViewerShell
       className={className}
       canReset={Boolean(model)}
-      scene={model ? <RingModel model={model} metal={metal} /> : null}
+      scene={
+        model ? (
+          <RingModel
+            model={model}
+            metal={metal}
+            partStates={partStates}
+            modelScale={modelScale}
+          />
+        ) : null
+      }
       onDragEnter={onDragEnter}
       onDragOver={(event) => event.preventDefault()}
       onDragLeave={onDragLeave}
@@ -250,11 +275,17 @@ export default function RingViewer({
           </div>
         ) : null
       }
-      footer={METAL_PRESETS.map((preset) => (
+      footer={
+        <div className="flex w-full flex-col items-center gap-2">
+          <div className="flex flex-wrap items-center justify-center gap-2">
+            {METAL_PRESETS.map((preset) => (
         <button
           key={preset.id}
           type="button"
-          onClick={() => setMetalId(preset.id)}
+          onClick={() => {
+            setMetalId(preset.id);
+            onMetalChange?.(preset.id);
+          }}
           aria-pressed={preset.id === metalId}
           className={[
             "pointer-events-auto flex items-center gap-2 rounded-full py-1.5 pl-1.5 pr-3.5 text-sm font-medium backdrop-blur transition",
@@ -267,9 +298,13 @@ export default function RingViewer({
             className="size-5 rounded-full ring-1 ring-black/10"
             style={{ background: preset.swatch }}
           />
-          {preset.label}
-        </button>
-      ))}
+            {preset.label}
+              </button>
+            ))}
+          </div>
+          {footerExtra}
+        </div>
+      }
       overlay={
         <>
           {!model && status !== "loading" ? (
@@ -357,22 +392,117 @@ export default function RingViewer({
 function RingModel({
   model,
   metal,
+  partStates,
+  modelScale,
 }: {
   model: LoadedModel;
   metal: MetalPreset;
+  partStates?: Record<string, PartState>;
+  modelScale: number;
 }) {
   return (
-    <group>
-      {model.geometries.map((geometry, index) => (
-        <mesh key={index} geometry={geometry}>
-          <meshStandardMaterial
-            color={metal.color}
-            metalness={metal.metalness}
-            roughness={metal.roughness}
-            envMapIntensity={metal.envMapIntensity}
+    <group scale={modelScale}>
+      {model.parts.map((part) => {
+        const state = partStates?.[part.id];
+        if (state && !state.visible) return null;
+        return (
+          <PartMeshes
+            key={part.id}
+            geometries={part.geometries}
+            material={state?.material ?? part.material}
+            scale={state?.scale ?? 1}
+            fallbackMetal={metal}
           />
-        </mesh>
-      ))}
+        );
+      })}
     </group>
+  );
+}
+
+/**
+ * One part's geometry, scaled about its own centre so growing a stone or a
+ * shank leaves the rest of the piece where it was.
+ */
+function PartMeshes({
+  geometries,
+  material,
+  scale,
+  fallbackMetal,
+}: {
+  geometries: THREE.BufferGeometry[];
+  material: PartState["material"];
+  scale: number;
+  fallbackMetal: MetalPreset;
+}) {
+  const center = useMemo(() => {
+    const bounds = new THREE.Box3();
+    for (const geometry of geometries) {
+      geometry.computeBoundingBox();
+      if (geometry.boundingBox) bounds.union(geometry.boundingBox);
+    }
+    return bounds.isEmpty()
+      ? new THREE.Vector3()
+      : bounds.getCenter(new THREE.Vector3());
+  }, [geometries]);
+
+  const meshes = geometries.map((geometry, index) => (
+    <mesh key={index} geometry={geometry}>
+      {material.kind === "stone" ? (
+        <StoneMaterial color={material.color} />
+      ) : (
+        <MetalMaterial metal={material.metal} fallback={fallbackMetal} />
+      )}
+    </mesh>
+  ));
+
+  if (scale === 1) return <group>{meshes}</group>;
+  return (
+    <group position={center}>
+      <group scale={scale} position={center.clone().negate()}>
+        {meshes}
+      </group>
+    </group>
+  );
+}
+
+function MetalMaterial({
+  metal,
+  fallback,
+}: {
+  metal: MetalId;
+  fallback: MetalPreset;
+}) {
+  const preset = METAL_PRESETS.find((candidate) => candidate.id === metal) ?? fallback;
+  return (
+    <meshStandardMaterial
+      color={preset.color}
+      metalness={preset.metalness}
+      roughness={preset.roughness}
+      envMapIntensity={preset.envMapIntensity}
+    />
+  );
+}
+
+/** Same gem look the parametric designer uses, so a stone reads as a stone. */
+function StoneMaterial({ color }: { color: keyof typeof STONE_APPEARANCE }) {
+  const look = STONE_APPEARANCE[color];
+  return (
+    <meshPhysicalMaterial
+      color={look.color}
+      attenuationColor={look.attenuationColor}
+      // The archive model is normalized into a 2-unit box, so the refraction
+      // ray is measured in those units rather than millimetres.
+      attenuationDistance={look.attenuationDistanceMm * 0.05}
+      transmission={look.transmission}
+      ior={look.ior}
+      dispersion={look.dispersion}
+      thickness={0.2}
+      metalness={0}
+      roughness={look.roughness}
+      clearcoat={0.7}
+      clearcoatRoughness={0.12}
+      envMapIntensity={1.4}
+      flatShading
+    />
   );
 }

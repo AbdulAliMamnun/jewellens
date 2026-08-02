@@ -263,4 +263,62 @@ write("brep-with-meshed-duplicate.3dm", (doc) => {
   );
 });
 
+// 11. A structured ring: named layers per component, a nested layer path, an
+//     instance definition placed several times, and named objects — the shape a
+//     Matrix export takes, and what part-level editing depends on.
+write("structured-ring-mm.3dm", (doc) => {
+  doc.settings().modelUnitSystem = rhino.UnitSystem.Millimeters;
+
+  const addLayer = (name, parentId) => {
+    const index = doc.layers().addLayer(name, { r: 180, g: 180, b: 180, a: 255 });
+    const layer = doc.layers().get(index);
+    if (parentId) layer.parentLayerId = parentId;
+    return { index, id: layer.id };
+  };
+
+  const ring = addLayer("Ring", null);
+  const shank = addLayer("Shank", ring.id);
+  const head = addLayer("Head", ring.id);
+  const centerStone = addLayer("Center Stone", head.id);
+  const halo = addLayer("Halo Stones", head.id);
+
+  const on = (layerIndex, name) => {
+    const attributes = new rhino.ObjectAttributes();
+    attributes.layerIndex = layerIndex;
+    if (name) attributes.name = name;
+    return attributes;
+  };
+
+  // Shank: one named mesh.
+  doc.objects().addMesh(torusMesh(9, 1.2), on(shank.index, "Shank Body"));
+
+  // Centre stone and halo: separate layers so materials can differ.
+  doc.objects().addMesh(pyramidMesh(3), on(centerStone.index, "Center Diamond"));
+  doc.objects().addMesh(pyramidMesh(1), on(halo.index, "Halo Melee 1"));
+  doc.objects().addMesh(pyramidMesh(1), on(halo.index, "Halo Melee 2"));
+
+  // Prongs: one definition placed four times, the way repeated components ship.
+  doc.instanceDefinitions().add(
+    "Prong",
+    "",
+    "",
+    "",
+    [0, 0, 0],
+    [boxMesh([0, 0, 0], [0.6, 0.6, 3])],
+    [new rhino.ObjectAttributes()],
+  );
+  const prong = doc.instanceDefinitions().get(0);
+  for (const [x, y] of [
+    [3, 3],
+    [-3, 3],
+    [-3, -3],
+    [3, -3],
+  ]) {
+    doc.objects().addInstanceObject(
+      new rhino.InstanceReference(prong.id, rhino.Transform.translationXYZ(x, y, 9)),
+      on(head.index, `Prong ${x}/${y}`),
+    );
+  }
+});
+
 console.log(`\nwrote fixtures to ${OUT_DIR}`);

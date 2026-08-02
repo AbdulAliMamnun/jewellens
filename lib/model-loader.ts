@@ -6,10 +6,12 @@ import { OBJLoader } from "three/addons/loaders/OBJLoader.js";
 // under Node's type stripping.
 import {
   extractRenderMeshes,
+  flattenParts,
   noRenderMeshesMessage,
   skippedSummary,
   type RawMesh,
 } from "./rhino-extract.ts";
+import { guessPartMaterial, type PartMaterial } from "./archive-parts.ts";
 
 export type ModelFormat = "stl" | "obj" | "3dm";
 
@@ -42,9 +44,30 @@ export class ModelLoadError extends Error {
   }
 }
 
-export interface LoadedModel {
-  /** Normalized, world-space geometry — render each as a plain `<mesh>`. */
+/**
+ * One editable component. STL and OBJ carry no structure, so they arrive as a
+ * single part covering the whole model; .3dm files arrive grouped by layer and
+ * instance definition.
+ */
+export interface LoadedPart {
+  id: string;
+  name: string;
+  layerPath: string | null;
+  definitionName: string | null;
+  objectNames: string[];
   geometries: THREE.BufferGeometry[];
+  triangleCount: number;
+  /** Assigned from the part's naming — see guessPartMaterial. */
+  material: PartMaterial;
+}
+
+export interface LoadedModel {
+  /** Every geometry, flattened. Same objects the parts reference. */
+  geometries: THREE.BufferGeometry[];
+  /** The file's own structure, or a single whole-model part. */
+  parts: LoadedPart[];
+  /** True when the file carried real structure to edit. */
+  hasParts: boolean;
   label: string;
   format: ModelFormat;
   triangleCount: number;
@@ -156,16 +179,21 @@ function countTriangles(geometries: THREE.BufferGeometry[]): number {
 }
 
 function finish(
-  geometries: THREE.BufferGeometry[],
+  parts: LoadedPart[],
   format: ModelFormat,
   label: string,
   unit: { scaleToMm: number; label: string; assumed: boolean },
   extras: { skippedSummary?: string | null; instancePlacements?: number } = {},
 ): LoadedModel {
+  const geometries = parts.flatMap((part) => part.geometries);
+  // Normalizing mutates the geometries in place, and the parts hold the same
+  // objects — so this centres and scales every part together.
   const sourceSize = normalize(geometries);
 
   return {
     geometries,
+    parts,
+    hasParts: parts.length > 1,
     label,
     format,
     triangleCount: countTriangles(geometries),
@@ -195,7 +223,24 @@ function buildMesh(format: "stl" | "obj", label: string, data: ArrayBuffer): Loa
       `Could not parse ${label} as ${format.toUpperCase()}.`,
     );
   }
-  return finish(collectGeometries(parsed), format, label, ASSUMED_MM);
+  const geometries = collectGeometries(parsed);
+  return finish(
+    [
+      {
+        id: "model",
+        name: "Whole model",
+        layerPath: null,
+        definitionName: null,
+        objectNames: [],
+        geometries,
+        triangleCount: countTriangles(geometries),
+        material: { kind: "metal", metal: "yellow_gold" },
+      },
+    ],
+    format,
+    label,
+    ASSUMED_MM,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -268,7 +313,7 @@ async function build3dm(label: string, data: ArrayBuffer): Promise<LoadedModel> 
 
   const extraction = extractRenderMeshes(rhino, doc);
 
-  if (extraction.meshes.length === 0) {
+  if (flattenParts(extraction.parts).length === 0) {
     throw new ModelLoadError(
       "no-render-meshes",
       `${label} has no render meshes to display.`,
@@ -276,11 +321,20 @@ async function build3dm(label: string, data: ArrayBuffer): Promise<LoadedModel> 
     );
   }
 
-  const geometries = extraction.meshes.map(geometryFromRawMesh);
+  const parts: LoadedPart[] = extraction.parts.map((part) => ({
+    id: part.id,
+    name: part.name,
+    layerPath: part.layerPath,
+    definitionName: part.definitionName,
+    objectNames: part.objectNames,
+    geometries: part.meshes.map(geometryFromRawMesh),
+    triangleCount: part.triangleCount,
+    material: guessPartMaterial(part),
+  }));
   const unit = extraction.unit;
 
   return finish(
-    geometries,
+    parts,
     "3dm",
     label,
     {

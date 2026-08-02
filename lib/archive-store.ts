@@ -1,6 +1,13 @@
 import { create } from "zustand";
 
 import {
+  guessPartMaterial,
+  type PartIdentity,
+  type PartMaterial,
+  type PartState,
+} from "@/lib/archive-parts";
+import type { ResolvedOperation } from "@/lib/archive-step";
+import {
   LARGE_FILE_BYTES,
   ModelLoadError,
   disposeModel,
@@ -48,6 +55,23 @@ export interface ArchiveEntry {
   /** Retained so an evicted model can be re-parsed without a re-upload. */
   file: File | null;
   url: string | null;
+
+  /** The file's own structure. Empty until the model has been parsed once. */
+  parts: (PartIdentity & { triangleCount: number })[];
+  /** True when the file carried more than one addressable component. */
+  hasParts: boolean;
+  /** Per-part visibility, material and scale — the archive edit state. */
+  partStates: Record<string, PartState>;
+  /** Whole-piece scale, from set_ring_size. */
+  modelScale: number;
+  /** What the piece is assumed to be before any resize. */
+  assumedRingSize: number;
+}
+
+export interface ChatMessage {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
 }
 
 interface ArchiveStore {
@@ -58,6 +82,12 @@ interface ArchiveStore {
   /** Transient message about the last drop, e.g. files that were skipped. */
   notice: string | null;
 
+  /** Conversation about the active piece. */
+  messages: ChatMessage[];
+  pending: boolean;
+  chatError: string | null;
+  unhandled: string[];
+
   addFiles: (files: File[]) => Promise<void>;
   addSample: (url: string, name: string) => Promise<void>;
   select: (id: string) => Promise<void>;
@@ -66,10 +96,23 @@ interface ArchiveStore {
   remove: (id: string) => void;
   clearAll: () => void;
   dismissNotice: () => void;
+
+  setPartState: (entryId: string, partId: string, patch: Partial<PartState>) => void;
+  setAllMetalParts: (entryId: string, metal: PartMaterial) => void;
+  resetEdits: (entryId: string) => void;
+  applyOperations: (entryId: string, operations: ResolvedOperation[]) => void;
+  sendArchiveMessage: (text: string) => Promise<void>;
+  dismissChatError: () => void;
 }
 
 let entryCounter = 0;
 const nextEntryId = () => `entry-${(entryCounter += 1)}`;
+
+let messageCounter = 0;
+const nextMessageId = () => `am${(messageCounter += 1)}`;
+
+/** How many prior turns are sent as context with each archive step. */
+const HISTORY_TURNS = 6;
 
 /** Most-recently-viewed first; drives eviction. */
 let recency: string[] = [];
@@ -136,7 +179,30 @@ export const useArchiveStore = create<ArchiveStore>((set, get) => {
       if (!model) throw new ModelLoadError("parse", `${entry.name} is no longer available.`);
 
       retain(id, model);
+      const parts = model.parts.map((part) => ({
+        id: part.id,
+        name: part.name,
+        layerPath: part.layerPath,
+        definitionName: part.definitionName,
+        objectNames: part.objectNames,
+        triangleCount: part.triangleCount,
+      }));
+      // Keep any edits the user already made to this piece across a re-parse
+      // (an LRU eviction re-reads the file, and part ids are deterministic).
+      const existing = get().entries.find((candidate) => candidate.id === id);
+      const partStates: Record<string, PartState> = {};
+      for (const part of model.parts) {
+        partStates[part.id] = existing?.partStates[part.id] ?? {
+          visible: true,
+          material: part.material,
+          scale: 1,
+        };
+      }
+
       patch(id, {
+        parts,
+        hasParts: model.hasParts,
+        partStates,
         status: "ready",
         progress: 1,
         triangleCount: model.triangleCount,
@@ -158,6 +224,10 @@ export const useArchiveStore = create<ArchiveStore>((set, get) => {
     activeId: null,
     models: {},
     notice: null,
+    messages: [],
+    pending: false,
+    chatError: null,
+    unhandled: [],
 
     dismissNotice: () => set({ notice: null }),
 
@@ -190,6 +260,11 @@ export const useArchiveStore = create<ArchiveStore>((set, get) => {
         skippedSummary: null,
         instancePlacements: 0,
         error: null,
+        parts: [],
+        hasParts: false,
+        partStates: {},
+        modelScale: 1,
+        assumedRingSize: 7,
         file,
         url: null,
       }));
@@ -227,6 +302,11 @@ export const useArchiveStore = create<ArchiveStore>((set, get) => {
         skippedSummary: null,
         instancePlacements: 0,
         error: null,
+        parts: [],
+        hasParts: false,
+        partStates: {},
+        modelScale: 1,
+        assumedRingSize: 7,
         file: null,
         url,
       };
@@ -274,11 +354,190 @@ export const useArchiveStore = create<ArchiveStore>((set, get) => {
       });
     },
 
+    setPartState: (entryId, partId, patch_) =>
+      set((state) => ({
+        entries: state.entries.map((entry) =>
+          entry.id === entryId
+            ? {
+                ...entry,
+                partStates: {
+                  ...entry.partStates,
+                  [partId]: { ...entry.partStates[partId], ...patch_ },
+                },
+              }
+            : entry,
+        ),
+      })),
+
+    setAllMetalParts: (entryId, material) =>
+      set((state) => ({
+        entries: state.entries.map((entry) => {
+          if (entry.id !== entryId) return entry;
+          const partStates = { ...entry.partStates };
+          for (const [partId, partState] of Object.entries(partStates)) {
+            // Only metal parts follow the metal chips; stones keep their colour.
+            if (partState.material.kind === "metal") {
+              partStates[partId] = { ...partState, material };
+            }
+          }
+          return { ...entry, partStates };
+        }),
+      })),
+
+    resetEdits: (entryId) =>
+      set((state) => ({
+        entries: state.entries.map((entry) => {
+          if (entry.id !== entryId) return entry;
+          const model = state.models[entryId];
+          const partStates: Record<string, PartState> = {};
+          for (const part of entry.parts) {
+            const fromModel = model?.parts.find((candidate) => candidate.id === part.id);
+            partStates[part.id] = {
+              visible: true,
+              material: fromModel?.material ?? guessPartMaterial(part),
+              scale: 1,
+            };
+          }
+          return { ...entry, partStates, modelScale: 1, assumedRingSize: 7 };
+        }),
+      })),
+
+    applyOperations: (entryId, operations) =>
+      set((state) => ({
+        entries: state.entries.map((entry) => {
+          if (entry.id !== entryId) return entry;
+          const partStates = { ...entry.partStates };
+          let modelScale = entry.modelScale;
+          let assumedRingSize = entry.assumedRingSize;
+
+          const update = (partId: string, patch_: Partial<PartState>) => {
+            const current = partStates[partId];
+            if (!current) return;
+            partStates[partId] = { ...current, ...patch_ };
+          };
+
+          for (const operation of operations) {
+            switch (operation.op) {
+              case "hide_parts":
+                for (const id of operation.partIds) update(id, { visible: false });
+                break;
+              case "show_parts":
+                for (const id of operation.partIds) update(id, { visible: true });
+                break;
+              case "set_part_material":
+                for (const id of operation.partIds) {
+                  update(id, { material: operation.material });
+                }
+                break;
+              case "scale_part":
+                for (const id of operation.partIds) {
+                  update(id, { scale: partStates[id]?.scale ?? 1 });
+                  update(id, { scale: (partStates[id]?.scale ?? 1) * operation.factor });
+                }
+                break;
+              case "set_ring_size":
+                // Resizing scales the whole piece, stones included.
+                modelScale = operation.factor;
+                assumedRingSize = operation.to;
+                break;
+            }
+          }
+
+          return { ...entry, partStates, modelScale, assumedRingSize };
+        }),
+      })),
+
+    dismissChatError: () => set({ chatError: null }),
+
+    sendArchiveMessage: async (text) => {
+      const trimmed = text.trim();
+      if (!trimmed || get().pending) return;
+
+      const entry = get().entries.find((candidate) => candidate.id === get().activeId);
+      if (!entry || entry.status !== "ready") {
+        set({ chatError: "Load a design before editing it." });
+        return;
+      }
+
+      const briefHistory = get()
+        .messages.slice(-HISTORY_TURNS)
+        .map((message) => ({ role: message.role, content: message.content }));
+
+      set((state) => ({
+        messages: [
+          ...state.messages,
+          { id: nextMessageId(), role: "user", content: trimmed },
+        ],
+        pending: true,
+        chatError: null,
+        unhandled: [],
+      }));
+
+      try {
+        const response = await fetch("/api/archive-step", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            parts: entry.parts.map((part) => ({
+              id: part.id,
+              name: part.name,
+              layerPath: part.layerPath,
+              definitionName: part.definitionName,
+              objectNames: part.objectNames,
+            })),
+            hasParts: entry.hasParts,
+            assumedRingSize: entry.assumedRingSize,
+            userMessage: trimmed,
+            briefHistory,
+          }),
+        });
+
+        const payload: unknown = await response.json().catch(() => null);
+        if (!response.ok) {
+          const message =
+            payload && typeof payload === "object" && "error" in payload
+              ? String((payload as { error: unknown }).error)
+              : `Edit failed (${response.status}).`;
+          throw new Error(message);
+        }
+
+        const data = payload as {
+          operations: ResolvedOperation[];
+          assistantNote: string;
+          unhandled?: string[];
+        };
+
+        if (data.operations?.length) get().applyOperations(entry.id, data.operations);
+
+        set((state) => ({
+          messages: [
+            ...state.messages,
+            { id: nextMessageId(), role: "assistant", content: data.assistantNote },
+          ],
+          unhandled: data.unhandled ?? [],
+          pending: false,
+        }));
+      } catch (cause) {
+        set({
+          pending: false,
+          chatError: cause instanceof Error ? cause.message : "Something went wrong.",
+        });
+      }
+    },
+
     clearAll: () => {
       recency = [];
       set((state) => {
         for (const model of Object.values(state.models)) disposeModel(model);
-        return { entries: [], models: {}, activeId: null, notice: null };
+        return {
+          entries: [],
+          models: {},
+          activeId: null,
+          notice: null,
+          messages: [],
+          unhandled: [],
+          chatError: null,
+        };
       });
     },
   };

@@ -39,8 +39,33 @@ export interface SkippedGroup {
   coveredByDuplicate: number;
 }
 
-export interface RhinoExtraction {
+/**
+ * One editable component of an archive design. Rhino files carry their own
+ * structure — layers per component, instance definitions for repeated parts —
+ * and that structure is what makes part-level editing possible at all, so it is
+ * preserved rather than flattened into one mesh soup.
+ */
+export interface ExtractedPart {
+  /** Stable across reloads: derived from the layer path and definition name. */
+  id: string;
+  /** Best human label: definition name, else layer name, else object name. */
+  name: string;
+  /** Full layer path as Rhino stores it, e.g. "Ring::Head::Prongs". */
+  layerPath: string | null;
+  layerName: string | null;
+  /** Set when the geometry arrived through an instance reference. */
+  definitionName: string | null;
+  /** Names of the objects that contributed, in file order. */
+  objectNames: string[];
+  /** Rhino geometry types seen, e.g. ["Mesh"] or ["Brep"]. */
+  geometryTypes: string[];
   meshes: RawMesh[];
+  triangleCount: number;
+}
+
+export interface RhinoExtraction {
+  /** Grouped geometry. Flatten with `part.meshes` when structure is irrelevant. */
+  parts: ExtractedPart[];
   /** null when the file declares None/Unset/CustomUnits. */
   unit: RhinoUnit | null;
   /** Top-level objects considered — instance-definition members are not counted. */
@@ -51,6 +76,11 @@ export interface RhinoExtraction {
   instancePlacements: number;
   /** Geometry we found but could not draw, by Rhino type name. */
   skipped: SkippedGroup[];
+}
+
+/** Every mesh in the file, structure discarded — for bounds and triangle counts. */
+export function flattenParts(parts: readonly ExtractedPart[]): RawMesh[] {
+  return parts.flatMap((part) => part.meshes);
 }
 
 /**
@@ -323,8 +353,16 @@ function isIgnorable(rhino: RhinoModule, objectType: unknown): boolean {
 /** Guards against a definition that references itself, directly or via a chain. */
 const MAX_INSTANCE_DEPTH = 8;
 
+/** A mesh plus where in the file's structure it came from. */
+interface WalkedMesh {
+  mesh: RawMesh;
+  /** Instance definition it was placed from, or null for direct geometry. */
+  definitionName: string | null;
+  geometryType: string;
+}
+
 interface WalkResult {
-  meshes: RawMesh[];
+  meshes: WalkedMesh[];
   /** Types encountered with no drawable mesh, in walk order. */
   skipped: string[];
   instancePlacements: number;
@@ -337,6 +375,8 @@ function walkGeometry(
   transform: Mat4 | null,
   activeDefinitions: Set<string>,
   depth: number,
+  /** Name of the innermost instance definition this geometry came from. */
+  definitionName: string | null = null,
 ): WalkResult {
   const result: WalkResult = { meshes: [], skipped: [], instancePlacements: 0 };
   if (!geometry) return result;
@@ -345,22 +385,26 @@ function walkGeometry(
 
   if (objectType === rhino.ObjectType.Mesh) {
     const raw = toRawMesh(geometry, transform);
-    if (raw) result.meshes.push(raw);
+    if (raw) result.meshes.push({ mesh: raw, definitionName, geometryType: "Mesh" });
     else result.skipped.push("Mesh");
     return result;
   }
 
   if (objectType === rhino.ObjectType.Brep) {
     const meshes = meshesFromBrep(rhino, geometry, transform);
-    if (meshes.length > 0) result.meshes.push(...meshes);
-    else result.skipped.push("Brep");
+    for (const mesh of meshes) {
+      result.meshes.push({ mesh, definitionName, geometryType: "Brep" });
+    }
+    if (meshes.length === 0) result.skipped.push("Brep");
     return result;
   }
 
   if (objectType === rhino.ObjectType.Extrusion) {
     const meshes = meshesFromExtrusion(rhino, geometry, transform);
-    if (meshes.length > 0) result.meshes.push(...meshes);
-    else result.skipped.push("Extrusion");
+    for (const mesh of meshes) {
+      result.meshes.push({ mesh, definitionName, geometryType: "Extrusion" });
+    }
+    if (meshes.length === 0) result.skipped.push("Extrusion");
     return result;
   }
 
@@ -377,6 +421,7 @@ function walkGeometry(
 
     const definition = doc.instanceDefinitions().findId(definitionId) as {
       getObjectIds?: () => ArrayLike<string>;
+      name?: string;
     } | null;
     if (!definition?.getObjectIds) {
       result.skipped.push("InstanceReference");
@@ -403,6 +448,7 @@ function walkGeometry(
         isIdentity(composed) ? null : composed,
         nextActive,
         depth + 1,
+        definition.name || definitionName,
       );
       result.meshes.push(...nested.meshes);
       result.skipped.push(...nested.skipped);
@@ -459,6 +505,25 @@ function boxesMatch(a: Box, b: Box): boolean {
   return true;
 }
 
+interface LayerInfo {
+  name: string | null;
+  fullPath: string | null;
+}
+
+/** Layer name and full path by index, or nulls when the file has no layer table. */
+function layerInfo(doc: File3dm, layerIndex: number): LayerInfo {
+  if (layerIndex < 0) return { name: null, fullPath: null };
+  const layers = doc.layers();
+  if (layerIndex >= layers.count) return { name: null, fullPath: null };
+  const layer = layers.get(layerIndex) as { name?: string; fullPath?: string } | null;
+  if (!layer) return { name: null, fullPath: null };
+  return {
+    name: layer.name || null,
+    // fullPath carries the nesting ("Ring::Head::Prongs"); fall back to the leaf.
+    fullPath: layer.fullPath || layer.name || null,
+  };
+}
+
 /** Every object id that belongs to an instance definition rather than the model. */
 function definitionMemberIds(doc: File3dm): Set<string> {
   const ids = new Set<string>();
@@ -479,7 +544,8 @@ export function extractRenderMeshes(
   // would place an untransformed copy at the origin alongside every reference.
   const memberIds = definitionMemberIds(doc);
 
-  const meshes: RawMesh[] = [];
+  /** Grouped by layer path + instance definition — the file's own structure. */
+  const groups = new Map<string, ExtractedPart>();
   const skips: { type: string; layerIndex: number; box: Box | null }[] = [];
   /** Standalone Mesh objects that drew — the only thing that can be a duplicate. */
   const drawnMeshObjects: { layerIndex: number; box: Box | null }[] = [];
@@ -490,7 +556,7 @@ export function extractRenderMeshes(
   for (let i = 0; i < objects.count; i++) {
     const object = objects.get(i) as {
       geometry: () => { objectType: unknown } | null;
-      attributes?: () => { id?: string; layerIndex?: number } | null;
+      attributes?: () => { id?: string; layerIndex?: number; name?: string } | null;
     } | null;
     if (!object) continue;
 
@@ -504,13 +570,47 @@ export function extractRenderMeshes(
 
     objectCount++;
     const layerIndex = attributes?.layerIndex ?? -1;
+    const layer = layerInfo(doc, layerIndex);
+    const objectName = attributes?.name || null;
     const walked = walkGeometry(rhino, doc, geometry, null, new Set(), 0);
 
     if (walked.meshes.length > 0) {
-      meshes.push(...walked.meshes);
       meshedObjectCount++;
       if (geometry.objectType === rhino.ObjectType.Mesh) {
         drawnMeshObjects.push({ layerIndex, box: boundingBoxOf(geometry) });
+      }
+
+      for (const walkedMesh of walked.meshes) {
+        // One part per (layer, instance definition): a definition placed six
+        // times is one editable component, not six.
+        const key = `${layer.fullPath ?? `layer${layerIndex}`}\u0000${walkedMesh.definitionName ?? ""}`;
+        let part = groups.get(key);
+        if (!part) {
+          part = {
+            id: key,
+            name:
+              walkedMesh.definitionName ||
+              layer.name ||
+              objectName ||
+              `Part ${groups.size + 1}`,
+            layerPath: layer.fullPath,
+            layerName: layer.name,
+            definitionName: walkedMesh.definitionName,
+            objectNames: [],
+            geometryTypes: [],
+            meshes: [],
+            triangleCount: 0,
+          };
+          groups.set(key, part);
+        }
+        if (objectName && !part.objectNames.includes(objectName)) {
+          part.objectNames.push(objectName);
+        }
+        if (!part.geometryTypes.includes(walkedMesh.geometryType)) {
+          part.geometryTypes.push(walkedMesh.geometryType);
+        }
+        part.meshes.push(walkedMesh.mesh);
+        part.triangleCount += walkedMesh.mesh.triangleCount;
       }
     }
     instancePlacements += walked.instancePlacements;
@@ -544,7 +644,7 @@ export function extractRenderMeshes(
   }
 
   return {
-    meshes,
+    parts: [...groups.values()],
     unit: resolveUnit(rhino, doc.settings().modelUnitSystem),
     objectCount,
     meshedObjectCount,

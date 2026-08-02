@@ -2,7 +2,9 @@
 
 import { useRef, useState } from "react";
 
+import ArchiveChat from "@/components/ArchiveChat";
 import ArchiveSidebar from "@/components/ArchiveSidebar";
+import PartsPanel from "@/components/PartsPanel";
 import DesignerViewer from "@/components/DesignerViewer";
 import RingViewer from "@/components/RingViewer";
 import { useArchiveStore } from "@/lib/archive-store";
@@ -30,6 +32,7 @@ export default function ViewerWorkbench() {
   const models = useArchiveStore((state) => state.models);
   const addFiles = useArchiveStore((state) => state.addFiles);
   const addSample = useArchiveStore((state) => state.addSample);
+  const setAllMetalParts = useArchiveStore((state) => state.setAllMetalParts);
 
   const filesInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
@@ -119,8 +122,25 @@ export default function ViewerWorkbench() {
               notice={notice}
               onFiles={handleFiles}
               title={activeEntry?.name ?? null}
+              partStates={activeEntry?.partStates}
+              modelScale={activeEntry?.modelScale ?? 1}
+              onMetalChange={(metal) => {
+                if (activeEntry) {
+                  setAllMetalParts(activeEntry.id, { kind: "metal", metal });
+                }
+              }}
+              footerExtra={
+                activeEntry?.status === "ready" ? (
+                  <div className="mx-auto w-full max-w-2xl">
+                    <ArchiveChat hasParts={activeEntry.hasParts} />
+                  </div>
+                ) : null
+              }
             />
           </div>
+          {activeEntry?.status === "ready" ? (
+            <PartsPanel entryId={activeEntry.id} />
+          ) : null}
         </div>
       )}
 

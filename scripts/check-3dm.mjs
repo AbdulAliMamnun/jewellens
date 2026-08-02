@@ -27,6 +27,7 @@ import rhino3dm from "rhino3dm";
 
 import {
   extractRenderMeshes,
+  flattenParts,
   noRenderMeshesMessage,
   skippedSummary,
 } from "../lib/rhino-extract.ts";
@@ -65,7 +66,7 @@ function load(name) {
 function bounds(extraction) {
   const min = [Infinity, Infinity, Infinity];
   const max = [-Infinity, -Infinity, -Infinity];
-  for (const mesh of extraction.meshes) {
+  for (const mesh of flattenParts(extraction.parts)) {
     for (let i = 0; i < mesh.position.length; i += 3) {
       for (let axis = 0; axis < 3; axis++) {
         min[axis] = Math.min(min[axis], mesh.position[i + axis]);
@@ -96,12 +97,12 @@ function meshBounds(mesh) {
 console.log("\nband-mm.3dm (Millimeters, 1 mesh object)");
 {
   const e = load("band-mm.3dm");
-  check("one object, one mesh", e.objectCount === 1 && e.meshes.length === 1);
+  check("one object, one mesh", e.objectCount === 1 && flattenParts(e.parts).length === 1);
   check("nothing skipped", e.skipped.length === 0, JSON.stringify(e.skipped));
   check("unit detected as Millimeters", e.unit?.name === "Millimeters", e.unit?.name);
   check("scale to mm is 1", e.unit?.scaleToMm === 1);
 
-  const mesh = e.meshes[0];
+  const mesh = flattenParts(e.parts)[0];
   check("triangles counted", mesh.triangleCount === 32 * 12 * 2, String(mesh.triangleCount));
   check("normals present", mesh.normal !== null && mesh.normal.length === mesh.position.length);
   check("index covers every triangle", mesh.index.length === mesh.triangleCount * 3);
@@ -151,12 +152,12 @@ console.log("\ntwo-objects-cm.3dm (Centimeters, 2 mesh objects)");
 {
   const e = load("two-objects-cm.3dm");
   check("both objects meshed", e.objectCount === 2 && e.meshedObjectCount === 2);
-  check("two meshes returned", e.meshes.length === 2, String(e.meshes.length));
+  check("two meshes returned", flattenParts(e.parts).length === 2, String(flattenParts(e.parts).length));
   check("unit scale is 10", e.unit?.scaleToMm === 10);
   check(
     "combined triangle count",
-    e.meshes.reduce((sum, m) => sum + m.triangleCount, 0) === 32 * 12 * 2 + 6,
-    String(e.meshes.reduce((sum, m) => sum + m.triangleCount, 0)),
+    flattenParts(e.parts).reduce((sum, m) => sum + m.triangleCount, 0) === 32 * 12 * 2 + 6,
+    String(flattenParts(e.parts).reduce((sum, m) => sum + m.triangleCount, 0)),
   );
 }
 
@@ -165,7 +166,7 @@ console.log("\nbrep-no-render-mesh.3dm (Brep + Extrusion, no cached meshes)");
 {
   const e = load("brep-no-render-mesh.3dm");
   check("parses without throwing", e.objectCount === 2);
-  check("no meshes extracted", e.meshes.length === 0);
+  check("no meshes extracted", flattenParts(e.parts).length === 0);
   check("no object meshed", e.meshedObjectCount === 0);
   check(
     "skipped inventory names the geometry types",
@@ -187,7 +188,7 @@ console.log("\nbrep-no-render-mesh.3dm (Brep + Extrusion, no cached meshes)");
 console.log("\nmixed-mm.3dm (mesh + meshless Brep + curve)");
 {
   const e = load("mixed-mm.3dm");
-  check("the drawable mesh is still returned", e.meshes.length === 1);
+  check("the drawable mesh is still returned", flattenParts(e.parts).length === 1);
   check("only one object meshed", e.meshedObjectCount === 1);
   check(
     "meshless Brep reported as skipped",
@@ -205,7 +206,7 @@ console.log("\nmixed-mm.3dm (mesh + meshless Brep + curve)");
 console.log("\nempty.3dm (no objects)");
 {
   const e = load("empty.3dm");
-  check("no objects, no meshes", e.objectCount === 0 && e.meshes.length === 0);
+  check("no objects, no meshes", e.objectCount === 0 && flattenParts(e.parts).length === 0);
   const message = noRenderMeshesMessage(e);
   check("message says the file is empty", message.includes("no objects"), message);
 }
@@ -215,7 +216,7 @@ console.log("\nno-units.3dm (UnitSystem.None)");
 {
   const e = load("no-units.3dm");
   check("unit resolves to null rather than guessing", e.unit === null);
-  check("geometry still extracted", e.meshes.length === 1);
+  check("geometry still extracted", flattenParts(e.parts).length === 1);
 }
 
 // --- 8. instance references -------------------------------------------------
@@ -225,12 +226,12 @@ console.log("\ninstances-mm.3dm (1 definition, 2 references with distinct transf
 
   check("two top-level objects counted", e.objectCount === 2, String(e.objectCount));
   check("both references resolved", e.instancePlacements === 2, String(e.instancePlacements));
-  check("two meshes extracted", e.meshes.length === 2, String(e.meshes.length));
+  check("two meshes extracted", flattenParts(e.parts).length === 2, String(flattenParts(e.parts).length));
   check("nothing skipped", e.skipped.length === 0, JSON.stringify(e.skipped));
 
   // The definition's member mesh also sits in the object table. Drawing it
   // directly would add a third, untransformed cube at the origin.
-  const atOrigin = e.meshes.filter((mesh) => {
+  const atOrigin = flattenParts(e.parts).filter((mesh) => {
     const b = meshBounds(mesh);
     return Math.abs(b.min[0]) < 1e-6 && Math.abs(b.min[1]) < 1e-6 && Math.abs(b.min[2]) < 1e-6;
   });
@@ -238,7 +239,7 @@ console.log("\ninstances-mm.3dm (1 definition, 2 references with distinct transf
 
   // Rhino translations (10,0,0) and (0,20,5) become, after Z-up → Y-up
   // (x, y, z) → (x, z, -y): (10, 0, 0) and (0, 5, -20).
-  const placements = e.meshes
+  const placements = flattenParts(e.parts)
     .map((mesh) => meshBounds(mesh).min.map(round3))
     .sort((a, b) => a[0] - b[0]);
 
@@ -261,12 +262,12 @@ console.log("\ninstances-mm.3dm (1 definition, 2 references with distinct transf
   );
   check(
     "each placement is a 1mm cube",
-    e.meshes.every((mesh) => meshBounds(mesh).size.every((s) => Math.abs(s - 1) < 1e-6)),
-    JSON.stringify(e.meshes.map((m) => meshBounds(m).size.map(round3))),
+    flattenParts(e.parts).every((mesh) => meshBounds(mesh).size.every((s) => Math.abs(s - 1) < 1e-6)),
+    JSON.stringify(flattenParts(e.parts).map((m) => meshBounds(m).size.map(round3))),
   );
   check(
     "normals survive the transform (unit length)",
-    e.meshes.every((mesh) => {
+    flattenParts(e.parts).every((mesh) => {
       if (!mesh.normal) return false;
       for (let i = 0; i < mesh.normal.length; i += 3) {
         const length = Math.hypot(mesh.normal[i], mesh.normal[i + 1], mesh.normal[i + 2]);
@@ -281,11 +282,11 @@ console.log("\ninstances-mm.3dm (1 definition, 2 references with distinct transf
 console.log("\nnested-instances-mm.3dm (reference → definition → reference → mesh)");
 {
   const e = load("nested-instances-mm.3dm");
-  check("one mesh extracted", e.meshes.length === 1, String(e.meshes.length));
+  check("one mesh extracted", flattenParts(e.parts).length === 1, String(flattenParts(e.parts).length));
   check("nothing skipped", e.skipped.length === 0, JSON.stringify(e.skipped));
 
   // Outer places the inner reference at x=100; inner is itself offset x=3.
-  const b = meshBounds(e.meshes[0]);
+  const b = meshBounds(flattenParts(e.parts)[0]);
   check(
     "composed transform puts the cube at x=103",
     Math.abs(b.min[0] - 103) < 1e-6,
@@ -299,7 +300,7 @@ console.log("\nbrep-with-meshed-duplicate.3dm (partial success + skip reporting)
 {
   const e = load("brep-with-meshed-duplicate.3dm");
 
-  check("the drawable mesh is rendered", e.meshes.length === 1, String(e.meshes.length));
+  check("the drawable mesh is rendered", flattenParts(e.parts).length === 1, String(flattenParts(e.parts).length));
   check("three top-level objects", e.objectCount === 3, String(e.objectCount));
   check("one object meshed", e.meshedObjectCount === 1);
 
@@ -365,8 +366,8 @@ console.log("\npublic/rhino3dm staged assets");
     );
     check(
       "staged module extracts the same mesh",
-      extraction.meshes.length === 1 && extraction.meshes[0].triangleCount === 768,
-      `${extraction.meshes.length} meshes`,
+      flattenParts(extraction.parts).length === 1 && flattenParts(extraction.parts)[0].triangleCount === 768,
+      `${flattenParts(extraction.parts).length} meshes`,
     );
   }
 }

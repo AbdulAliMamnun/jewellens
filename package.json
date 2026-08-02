@@ -11,7 +11,8 @@
     "check:design": "node scripts/check-design-step.mjs",
     "predev": "node scripts/copy-rhino3dm.mjs",
     "prebuild": "node scripts/copy-rhino3dm.mjs",
-    "check:3dm": "node scripts/make-test-3dm.mjs && node scripts/check-3dm.mjs"
+    "check:3dm": "node scripts/make-test-3dm.mjs && node scripts/check-3dm.mjs && node scripts/check-archive-parts.mjs",
+    "check:archive": "node scripts/check-archive-parts.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.115.0",
