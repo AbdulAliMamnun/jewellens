@@ -145,4 +145,122 @@ write("no-units.3dm", (doc) => {
   doc.objects().addMesh(torusMesh(9, 1.2), null);
 });
 
+/**
+ * A unit cube mesh spanning 0..1 on every axis, so a placement's position can
+ * be read straight off the extracted bounding box.
+ */
+function unitCubeMesh() {
+  return boxMesh([0, 0, 0], [1, 1, 1]);
+}
+
+/** Axis-aligned box mesh spanning min..max. */
+function boxMesh([x0, y0, z0], [x1, y1, z1]) {
+  const mesh = new rhino.Mesh();
+  const v = mesh.vertices();
+  v.add(x0, y0, z0); v.add(x1, y0, z0); v.add(x1, y1, z0); v.add(x0, y1, z0);
+  v.add(x0, y0, z1); v.add(x1, y0, z1); v.add(x1, y1, z1); v.add(x0, y1, z1);
+  const f = mesh.faces();
+  f.addQuadFace(0, 3, 2, 1); // bottom
+  f.addQuadFace(4, 5, 6, 7); // top
+  f.addQuadFace(0, 1, 5, 4);
+  f.addQuadFace(1, 2, 6, 5);
+  f.addQuadFace(2, 3, 7, 6);
+  f.addQuadFace(3, 0, 4, 7);
+  mesh.normals().computeNormals();
+  return mesh;
+}
+
+// 8. Instance definition placed twice with distinct transforms — how Matrix
+//    stores repeated components such as prongs and pavé stones.
+write("instances-mm.3dm", (doc) => {
+  doc.settings().modelUnitSystem = rhino.UnitSystem.Millimeters;
+  doc.instanceDefinitions().add(
+    "Prong",
+    "unit cube stand-in for a repeated component",
+    "",
+    "",
+    [0, 0, 0],
+    [unitCubeMesh()],
+    [new rhino.ObjectAttributes()],
+  );
+  const definition = doc.instanceDefinitions().get(0);
+
+  doc.objects().addInstanceObject(
+    new rhino.InstanceReference(definition.id, rhino.Transform.translationXYZ(10, 0, 0)),
+    new rhino.ObjectAttributes(),
+  );
+  doc.objects().addInstanceObject(
+    new rhino.InstanceReference(definition.id, rhino.Transform.translationXYZ(0, 20, 5)),
+    new rhino.ObjectAttributes(),
+  );
+});
+
+// 9. Nested references: an outer definition that contains a reference to the
+//    inner one, so transforms have to compose.
+write("nested-instances-mm.3dm", (doc) => {
+  doc.settings().modelUnitSystem = rhino.UnitSystem.Millimeters;
+
+  doc.instanceDefinitions().add(
+    "Inner",
+    "",
+    "",
+    "",
+    [0, 0, 0],
+    [unitCubeMesh()],
+    [new rhino.ObjectAttributes()],
+  );
+  const inner = doc.instanceDefinitions().get(0);
+
+  // The outer definition's member is itself an instance reference, offset by 3
+  // on X relative to the outer definition's own origin.
+  doc.instanceDefinitions().add(
+    "Outer",
+    "",
+    "",
+    "",
+    [0, 0, 0],
+    [new rhino.InstanceReference(inner.id, rhino.Transform.translationXYZ(3, 0, 0))],
+    [new rhino.ObjectAttributes()],
+  );
+  const outer = doc.instanceDefinitions().findId(
+    doc.instanceDefinitions().get(1).id,
+  );
+
+  doc.objects().addInstanceObject(
+    new rhino.InstanceReference(outer.id, rhino.Transform.translationXYZ(100, 0, 0)),
+    new rhino.ObjectAttributes(),
+  );
+});
+
+// 10. A meshless Brep sharing a layer with a separately meshed duplicate —
+//     the "render what's drawable, report the rest" fallback.
+write("brep-with-meshed-duplicate.3dm", (doc) => {
+  doc.settings().modelUnitSystem = rhino.UnitSystem.Millimeters;
+
+  const layerIndex = doc.layers().addLayer("Band", { r: 200, g: 160, b: 60, a: 255 });
+  const onBand = new rhino.ObjectAttributes();
+  onBand.layerIndex = layerIndex;
+
+  // The solid, with no cached render mesh...
+  doc.objects().addBrep(
+    rhino.Brep.createFromBoundingBox(new rhino.BoundingBox([0, 0, 0], [4, 5, 6])),
+    onBand,
+  );
+  // ...and its meshed duplicate: the same box, in the same place, as a mesh.
+  doc.objects().addMesh(boxMesh([0, 0, 0], [4, 5, 6]), onBand);
+
+  // A meshless solid on a different layer, which nothing covers.
+  const otherLayer = doc.layers().addLayer("Gallery", { r: 40, g: 40, b: 40, a: 255 });
+  const onOther = new rhino.ObjectAttributes();
+  onOther.layerIndex = otherLayer;
+  doc.objects().addExtrusion(
+    rhino.Extrusion.createCylinderExtrusion(
+      new rhino.Cylinder(new rhino.Circle(3), 8),
+      true,
+      true,
+    ),
+    onOther,
+  );
+});
+
 console.log(`\nwrote fixtures to ${OUT_DIR}`);

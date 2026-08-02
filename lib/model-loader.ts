@@ -7,6 +7,7 @@ import { OBJLoader } from "three/addons/loaders/OBJLoader.js";
 import {
   extractRenderMeshes,
   noRenderMeshesMessage,
+  skippedSummary,
   type RawMesh,
 } from "./rhino-extract.ts";
 
@@ -57,6 +58,13 @@ export interface LoadedModel {
   /** What the millimetre figures are based on — shown next to the dimensions. */
   unitLabel: string;
   unitAssumed: boolean;
+  /**
+   * Geometry the file contained but that could not be drawn, when the load
+   * still succeeded. null when everything rendered.
+   */
+  skippedSummary: string | null;
+  /** Instance references resolved into placements (.3dm only). */
+  instancePlacements: number;
 }
 
 export interface LoadOptions {
@@ -152,6 +160,7 @@ function finish(
   format: ModelFormat,
   label: string,
   unit: { scaleToMm: number; label: string; assumed: boolean },
+  extras: { skippedSummary?: string | null; instancePlacements?: number } = {},
 ): LoadedModel {
   const sourceSize = normalize(geometries);
 
@@ -168,6 +177,8 @@ function finish(
     },
     unitLabel: unit.label,
     unitAssumed: unit.assumed,
+    skippedSummary: extras.skippedSummary ?? null,
+    instancePlacements: extras.instancePlacements ?? 0,
   };
 }
 
@@ -268,11 +279,22 @@ async function build3dm(label: string, data: ArrayBuffer): Promise<LoadedModel> 
   const geometries = extraction.meshes.map(geometryFromRawMesh);
   const unit = extraction.unit;
 
-  return finish(geometries, "3dm", label, {
-    scaleToMm: unit?.scaleToMm ?? 1,
-    label: unit ? unitAbbreviation(unit.name) : "mm",
-    assumed: unit === null,
-  });
+  return finish(
+    geometries,
+    "3dm",
+    label,
+    {
+      scaleToMm: unit?.scaleToMm ?? 1,
+      label: unit ? unitAbbreviation(unit.name) : "mm",
+      assumed: unit === null,
+    },
+    {
+      // Partial success is reported, not swallowed: the session list says what
+      // was left out and whether a meshed duplicate is covering for it.
+      skippedSummary: skippedSummary(extraction),
+      instancePlacements: extraction.instancePlacements,
+    },
+  );
 }
 
 function unitAbbreviation(name: string): string {

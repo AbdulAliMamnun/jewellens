@@ -108,6 +108,9 @@ export default function ArchiveSidebar() {
                         {dimensions && entry.status === "ready" ? (
                           <span className="mt-0.5 block text-xs text-zinc-400">
                             {dimensions}
+                            {entry.instancePlacements > 0
+                              ? ` · ${entry.instancePlacements} instance${entry.instancePlacements > 1 ? "s" : ""}`
+                              : ""}
                           </span>
                         ) : null}
                       </button>
@@ -124,6 +127,14 @@ export default function ArchiveSidebar() {
                         ✕
                       </button>
                     </div>
+
+                    {/* Partial success: say what was left out rather than
+                        rendering a subset and staying quiet about it. */}
+                    {entry.status === "ready" && entry.skippedSummary ? (
+                      <p className="mt-1.5 rounded-md bg-amber-50 px-2 py-1 text-xs leading-snug text-amber-900">
+                        {entry.skippedSummary}
+                      </p>
+                    ) : null}
 
                     {entry.status === "loading" ? (
                       <div className="mt-2 h-1 overflow-hidden rounded-full bg-zinc-200">

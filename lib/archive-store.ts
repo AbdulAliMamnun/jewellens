@@ -40,6 +40,10 @@ export interface ArchiveEntry {
   sizeMm: { x: number; y: number; z: number } | null;
   unitLabel: string | null;
   unitAssumed: boolean;
+  /** Geometry the file carried but that could not be drawn — null when all of it rendered. */
+  skippedSummary: string | null;
+  /** Instance references resolved into placements (.3dm only). */
+  instancePlacements: number;
   error: { code: ModelLoadErrorCode; message: string; detail?: string } | null;
   /** Retained so an evicted model can be re-parsed without a re-upload. */
   file: File | null;
@@ -139,6 +143,8 @@ export const useArchiveStore = create<ArchiveStore>((set, get) => {
         sizeMm: model.sizeMm,
         unitLabel: model.unitLabel,
         unitAssumed: model.unitAssumed,
+        skippedSummary: model.skippedSummary,
+        instancePlacements: model.instancePlacements,
         error: null,
       });
       if (!get().activeId) set({ activeId: id });
@@ -181,6 +187,8 @@ export const useArchiveStore = create<ArchiveStore>((set, get) => {
         sizeMm: null,
         unitLabel: null,
         unitAssumed: false,
+        skippedSummary: null,
+        instancePlacements: 0,
         error: null,
         file,
         url: null,
@@ -216,6 +224,8 @@ export const useArchiveStore = create<ArchiveStore>((set, get) => {
         sizeMm: null,
         unitLabel: null,
         unitAssumed: false,
+        skippedSummary: null,
+        instancePlacements: 0,
         error: null,
         file: null,
         url,

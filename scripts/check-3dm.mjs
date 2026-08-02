@@ -25,7 +25,11 @@ import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import rhino3dm from "rhino3dm";
 
-import { extractRenderMeshes, noRenderMeshesMessage } from "../lib/rhino-extract.ts";
+import {
+  extractRenderMeshes,
+  noRenderMeshesMessage,
+  skippedSummary,
+} from "../lib/rhino-extract.ts";
 
 const FIXTURES = join(
   dirname(fileURLToPath(import.meta.url)),
@@ -73,6 +77,20 @@ function bounds(extraction) {
 }
 
 const round2 = (n) => Math.round(n * 100) / 100;
+const round3 = (n) => Math.round(n * 1000) / 1000;
+
+/** Bounding box of a single extracted mesh. */
+function meshBounds(mesh) {
+  const min = [Infinity, Infinity, Infinity];
+  const max = [-Infinity, -Infinity, -Infinity];
+  for (let i = 0; i < mesh.position.length; i += 3) {
+    for (let axis = 0; axis < 3; axis++) {
+      min[axis] = Math.min(min[axis], mesh.position[i + axis]);
+      max[axis] = Math.max(max[axis], mesh.position[i + axis]);
+    }
+  }
+  return { min, max, size: max.map((v, i) => v - min[i]) };
+}
 
 // --- 1. millimetres, single mesh -------------------------------------------
 console.log("\nband-mm.3dm (Millimeters, 1 mesh object)");
@@ -200,7 +218,129 @@ console.log("\nno-units.3dm (UnitSystem.None)");
   check("geometry still extracted", e.meshes.length === 1);
 }
 
-// --- 8. the staged browser assets -------------------------------------------
+// --- 8. instance references -------------------------------------------------
+console.log("\ninstances-mm.3dm (1 definition, 2 references with distinct transforms)");
+{
+  const e = load("instances-mm.3dm");
+
+  check("two top-level objects counted", e.objectCount === 2, String(e.objectCount));
+  check("both references resolved", e.instancePlacements === 2, String(e.instancePlacements));
+  check("two meshes extracted", e.meshes.length === 2, String(e.meshes.length));
+  check("nothing skipped", e.skipped.length === 0, JSON.stringify(e.skipped));
+
+  // The definition's member mesh also sits in the object table. Drawing it
+  // directly would add a third, untransformed cube at the origin.
+  const atOrigin = e.meshes.filter((mesh) => {
+    const b = meshBounds(mesh);
+    return Math.abs(b.min[0]) < 1e-6 && Math.abs(b.min[1]) < 1e-6 && Math.abs(b.min[2]) < 1e-6;
+  });
+  check("definition member not drawn untransformed", atOrigin.length === 0, `${atOrigin.length} at origin`);
+
+  // Rhino translations (10,0,0) and (0,20,5) become, after Z-up → Y-up
+  // (x, y, z) → (x, z, -y): (10, 0, 0) and (0, 5, -20).
+  const placements = e.meshes
+    .map((mesh) => meshBounds(mesh).min.map(round3))
+    .sort((a, b) => a[0] - b[0]);
+
+  // The cube spans 0..1, so under (x, y, z) → (x, z, -y) the min corner of a
+  // placement at Rhino (tx, ty, tz) is (tx, tz, -(ty + 1)).
+  check(
+    "placement at Rhino (10,0,0) lands at scene min (10,0,-1)",
+    placements.some((p) => p[0] === 10 && p[1] === 0 && p[2] === -1),
+    JSON.stringify(placements),
+  );
+  check(
+    "placement at Rhino (0,20,5) lands at scene min (0,5,-21)",
+    placements.some((p) => p[0] === 0 && p[1] === 5 && p[2] === -21),
+    JSON.stringify(placements),
+  );
+  check(
+    "the two placements are distinct",
+    JSON.stringify(placements[0]) !== JSON.stringify(placements[1]),
+    JSON.stringify(placements),
+  );
+  check(
+    "each placement is a 1mm cube",
+    e.meshes.every((mesh) => meshBounds(mesh).size.every((s) => Math.abs(s - 1) < 1e-6)),
+    JSON.stringify(e.meshes.map((m) => meshBounds(m).size.map(round3))),
+  );
+  check(
+    "normals survive the transform (unit length)",
+    e.meshes.every((mesh) => {
+      if (!mesh.normal) return false;
+      for (let i = 0; i < mesh.normal.length; i += 3) {
+        const length = Math.hypot(mesh.normal[i], mesh.normal[i + 1], mesh.normal[i + 2]);
+        if (Math.abs(length - 1) > 1e-3) return false;
+      }
+      return true;
+    }),
+  );
+}
+
+// --- 9. nested instance references ------------------------------------------
+console.log("\nnested-instances-mm.3dm (reference → definition → reference → mesh)");
+{
+  const e = load("nested-instances-mm.3dm");
+  check("one mesh extracted", e.meshes.length === 1, String(e.meshes.length));
+  check("nothing skipped", e.skipped.length === 0, JSON.stringify(e.skipped));
+
+  // Outer places the inner reference at x=100; inner is itself offset x=3.
+  const b = meshBounds(e.meshes[0]);
+  check(
+    "composed transform puts the cube at x=103",
+    Math.abs(b.min[0] - 103) < 1e-6,
+    String(round3(b.min[0])),
+  );
+  check("cube is still 1mm", b.size.every((s) => Math.abs(s - 1) < 1e-6), JSON.stringify(b.size.map(round3)));
+}
+
+// --- 10. meshless Brep with a meshed duplicate on the same layer -------------
+console.log("\nbrep-with-meshed-duplicate.3dm (partial success + skip reporting)");
+{
+  const e = load("brep-with-meshed-duplicate.3dm");
+
+  check("the drawable mesh is rendered", e.meshes.length === 1, String(e.meshes.length));
+  check("three top-level objects", e.objectCount === 3, String(e.objectCount));
+  check("one object meshed", e.meshedObjectCount === 1);
+
+  const brep = e.skipped.find((s) => s.type === "Brep");
+  const extrusion = e.skipped.find((s) => s.type === "Extrusion");
+  check("meshless Brep reported", brep?.count === 1, JSON.stringify(e.skipped));
+  check(
+    "Brep recognised as covered by the meshed duplicate on its layer",
+    brep?.coveredByDuplicate === 1,
+    JSON.stringify(brep),
+  );
+  check("meshless Extrusion reported", extrusion?.count === 1, JSON.stringify(e.skipped));
+  check(
+    "Extrusion on an unmeshed layer is not marked covered",
+    extrusion?.coveredByDuplicate === 0,
+    JSON.stringify(extrusion),
+  );
+
+  const summary = skippedSummary(e);
+  check("summary mentions both types", /Brep/.test(summary) && /Extrusion/.test(summary), summary);
+  check("summary reports the covered count", /covered by a meshed copy/.test(summary), summary);
+  console.log(`       → "${summary}"`);
+}
+
+// --- 11. skippedSummary shapes ----------------------------------------------
+console.log("\nskippedSummary");
+{
+  check("null when nothing was skipped", skippedSummary(load("band-mm.3dm")) === null);
+
+  // mixed-mm.3dm has a Brep and a torus mesh on the same (default) layer, but
+  // they are different parts — a shared layer alone must not claim coverage.
+  const mixed = skippedSummary(load("mixed-mm.3dm"));
+  check("mixed doc reports the un-drawn Brep", /Brep/.test(mixed), mixed);
+  check(
+    "unrelated mesh on the same layer is not treated as a duplicate",
+    /not shown/.test(mixed),
+    mixed,
+  );
+}
+
+// --- 12. the staged browser assets ------------------------------------------
 // public/rhino3dm/ is what the browser actually fetches. Instantiating that
 // exact pair here proves the copy step produced a complete, working module.
 console.log("\npublic/rhino3dm staged assets");

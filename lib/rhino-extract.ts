@@ -13,7 +13,7 @@
 type RhinoModule = Awaited<ReturnType<typeof import("rhino3dm").default>>;
 type File3dm = ReturnType<RhinoModule["File3dm"]["fromByteArray"]>;
 
-/** A triangulated mesh in the file's own units, already rotated Z-up → Y-up. */
+/** A triangulated mesh in the file's own units, rotated Z-up → Y-up. */
 export interface RawMesh {
   position: Float32Array;
   normal: Float32Array | null;
@@ -28,15 +28,29 @@ export interface RhinoUnit {
   scaleToMm: number;
 }
 
+export interface SkippedGroup {
+  type: string;
+  count: number;
+  /**
+   * How many of those sit on a layer that also carries a drawable mesh — a
+   * meshed duplicate of the same part, so the geometry is probably on screen
+   * anyway. Common in Matrix files where a solid and its mesh are both kept.
+   */
+  coveredByDuplicate: number;
+}
+
 export interface RhinoExtraction {
   meshes: RawMesh[];
   /** null when the file declares None/Unset/CustomUnits. */
   unit: RhinoUnit | null;
+  /** Top-level objects considered — instance-definition members are not counted. */
   objectCount: number;
   /** Objects that yielded at least one mesh. */
   meshedObjectCount: number;
+  /** Instance references successfully resolved to geometry. */
+  instancePlacements: number;
   /** Geometry we found but could not draw, by Rhino type name. */
-  skipped: { type: string; count: number }[];
+  skipped: SkippedGroup[];
 }
 
 /**
@@ -77,62 +91,212 @@ export function resolveUnit(rhino: RhinoModule, unitSystem: unknown): RhinoUnit 
   return null;
 }
 
-function toRawMesh(mesh: unknown): RawMesh | null {
+// ---------------------------------------------------------------------------
+// Transforms
+//
+// Instance transforms live in Rhino's Z-up space, so they are composed and
+// applied there; the Z-up → Y-up swap happens once, last, per vertex. Rhino
+// geometry is never mutated — a definition's mesh is shared by every reference
+// to it, so transforming it in place would corrupt the next placement.
+// ---------------------------------------------------------------------------
+
+/** Row-major 4x4. */
+export type Mat4 = number[];
+
+const IDENTITY: Mat4 = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+
+function matrixFromXform(xform: unknown): Mat4 {
+  const m = xform as Record<string, number>;
+  return [
+    m.m00, m.m01, m.m02, m.m03,
+    m.m10, m.m11, m.m12, m.m13,
+    m.m20, m.m21, m.m22, m.m23,
+    m.m30, m.m31, m.m32, m.m33,
+  ];
+}
+
+/** a ∘ b — b applied first. */
+function multiply(a: Mat4, b: Mat4): Mat4 {
+  const out = new Array<number>(16).fill(0);
+  for (let row = 0; row < 4; row++) {
+    for (let col = 0; col < 4; col++) {
+      let sum = 0;
+      for (let k = 0; k < 4; k++) sum += a[row * 4 + k] * b[k * 4 + col];
+      out[row * 4 + col] = sum;
+    }
+  }
+  return out;
+}
+
+function isIdentity(m: Mat4): boolean {
+  for (let i = 0; i < 16; i++) {
+    if (Math.abs(m[i] - IDENTITY[i]) > 1e-12) return false;
+  }
+  return true;
+}
+
+function determinant3(m: Mat4): number {
+  return (
+    m[0] * (m[5] * m[10] - m[6] * m[9]) -
+    m[1] * (m[4] * m[10] - m[6] * m[8]) +
+    m[2] * (m[4] * m[9] - m[5] * m[8])
+  );
+}
+
+/**
+ * Inverse-transpose of the linear part, so normals stay perpendicular under
+ * non-uniform scale. Falls back to the linear part when the matrix is singular.
+ */
+function normalMatrix(m: Mat4): number[] {
+  const det = determinant3(m);
+  if (Math.abs(det) < 1e-12) return [m[0], m[1], m[2], m[4], m[5], m[6], m[8], m[9], m[10]];
+
+  const inv = [
+    (m[5] * m[10] - m[6] * m[9]) / det,
+    (m[2] * m[9] - m[1] * m[10]) / det,
+    (m[1] * m[6] - m[2] * m[5]) / det,
+    (m[6] * m[8] - m[4] * m[10]) / det,
+    (m[0] * m[10] - m[2] * m[8]) / det,
+    (m[2] * m[4] - m[0] * m[6]) / det,
+    (m[4] * m[9] - m[5] * m[8]) / det,
+    (m[1] * m[8] - m[0] * m[9]) / det,
+    (m[0] * m[5] - m[1] * m[4]) / det,
+  ];
+  // Transpose of the inverse.
+  return [inv[0], inv[3], inv[6], inv[1], inv[4], inv[7], inv[2], inv[5], inv[8]];
+}
+
+// ---------------------------------------------------------------------------
+// Mesh conversion
+// ---------------------------------------------------------------------------
+
+interface ThreeBuffers {
+  position?: ArrayLike<number>;
+  normal?: ArrayLike<number>;
+  index?: ArrayLike<number>;
+}
+
+/**
+ * @param transform world transform in Rhino space, or null for an object placed
+ *   directly in the document.
+ */
+function toRawMesh(mesh: unknown, transform: Mat4 | null): RawMesh | null {
   const source = mesh as {
-    toThreejsBuffers?: (rotateToYUp: boolean) => {
-      position?: ArrayLike<number>;
-      normal?: ArrayLike<number>;
-      index?: ArrayLike<number>;
-    };
+    toThreejsBuffers?: (rotateToYUp: boolean) => ThreeBuffers;
   };
   if (!source?.toThreejsBuffers) return null;
 
-  // `true` rotates Rhino's Z-up into three's Y-up and triangulates quads.
-  const buffers = source.toThreejsBuffers(true);
-  const position = buffers.position;
-  const index = buffers.index;
-  if (!position || position.length < 9 || !index || index.length < 3) return null;
+  // Raw Rhino coordinates: the Y-up swap is applied below, after the transform.
+  const buffers = source.toThreejsBuffers(false);
+  const rawPosition = buffers.position;
+  const rawIndex = buffers.index;
+  if (!rawPosition || rawPosition.length < 9 || !rawIndex || rawIndex.length < 3) {
+    return null;
+  }
 
-  const positions = Float32Array.from(position);
-  const indices =
-    positions.length / 3 > 65535
-      ? Uint32Array.from(index)
-      : Uint16Array.from(index);
+  const vertexCount = Math.floor(rawPosition.length / 3);
+  const position = new Float32Array(vertexCount * 3);
+  const hasNormals = Boolean(buffers.normal && buffers.normal.length === rawPosition.length);
+  const normal = hasNormals ? new Float32Array(vertexCount * 3) : null;
+  const linear = transform ? normalMatrix(transform) : null;
 
-  return {
-    position: positions,
-    normal: buffers.normal ? Float32Array.from(buffers.normal) : null,
-    index: indices,
-    triangleCount: Math.floor(indices.length / 3),
-  };
+  for (let i = 0; i < vertexCount; i++) {
+    const x = rawPosition[i * 3];
+    const y = rawPosition[i * 3 + 1];
+    const z = rawPosition[i * 3 + 2];
+
+    let px = x;
+    let py = y;
+    let pz = z;
+    if (transform) {
+      const m = transform;
+      px = m[0] * x + m[1] * y + m[2] * z + m[3];
+      py = m[4] * x + m[5] * y + m[6] * z + m[7];
+      pz = m[8] * x + m[9] * y + m[10] * z + m[11];
+    }
+
+    // Rhino Z-up → three Y-up, matching rhino3dm's own rotateToYUp.
+    position[i * 3] = px;
+    position[i * 3 + 1] = pz;
+    position[i * 3 + 2] = -py;
+
+    if (normal && buffers.normal) {
+      const nx = buffers.normal[i * 3];
+      const ny = buffers.normal[i * 3 + 1];
+      const nz = buffers.normal[i * 3 + 2];
+
+      let tx = nx;
+      let ty = ny;
+      let tz = nz;
+      if (linear) {
+        tx = linear[0] * nx + linear[1] * ny + linear[2] * nz;
+        ty = linear[3] * nx + linear[4] * ny + linear[5] * nz;
+        tz = linear[6] * nx + linear[7] * ny + linear[8] * nz;
+        const length = Math.hypot(tx, ty, tz) || 1;
+        tx /= length;
+        ty /= length;
+        tz /= length;
+      }
+
+      normal[i * 3] = tx;
+      normal[i * 3 + 1] = tz;
+      normal[i * 3 + 2] = -ty;
+    }
+  }
+
+  const triangleCount = Math.floor(rawIndex.length / 3);
+  const index =
+    vertexCount > 65535 ? new Uint32Array(rawIndex.length) : new Uint16Array(rawIndex.length);
+  // A mirrored instance flips handedness; without reversing the winding the
+  // placement renders inside-out.
+  const mirrored = transform !== null && determinant3(transform) < 0;
+  for (let t = 0; t < triangleCount; t++) {
+    const a = rawIndex[t * 3];
+    const b = rawIndex[t * 3 + 1];
+    const c = rawIndex[t * 3 + 2];
+    index[t * 3] = a;
+    index[t * 3 + 1] = mirrored ? c : b;
+    index[t * 3 + 2] = mirrored ? b : c;
+  }
+
+  return { position, normal, index, triangleCount };
 }
 
+// ---------------------------------------------------------------------------
+// Geometry walking
+// ---------------------------------------------------------------------------
+
 /** Meshes cached on a Brep's faces — how Rhino stores a solid's render mesh. */
-function meshesFromBrep(rhino: RhinoModule, brep: unknown): RawMesh[] {
+function meshesFromBrep(
+  rhino: RhinoModule,
+  brep: unknown,
+  transform: Mat4 | null,
+): RawMesh[] {
   const faces = (brep as { faces?: () => { count: number; get: (i: number) => unknown } })
     .faces?.();
   if (!faces) return [];
 
   const meshes: RawMesh[] = [];
   for (let i = 0; i < faces.count; i++) {
-    const face = faces.get(i) as {
-      getMesh?: (meshType: unknown) => unknown;
-    } | null;
+    const face = faces.get(i) as { getMesh?: (meshType: unknown) => unknown } | null;
     if (!face?.getMesh) continue;
-    const mesh =
-      face.getMesh(rhino.MeshType.Render) ?? face.getMesh(rhino.MeshType.Any);
-    const raw = mesh ? toRawMesh(mesh) : null;
+    const mesh = face.getMesh(rhino.MeshType.Render) ?? face.getMesh(rhino.MeshType.Any);
+    const raw = mesh ? toRawMesh(mesh, transform) : null;
     if (raw) meshes.push(raw);
   }
   return meshes;
 }
 
-function meshesFromExtrusion(rhino: RhinoModule, extrusion: unknown): RawMesh[] {
+function meshesFromExtrusion(
+  rhino: RhinoModule,
+  extrusion: unknown,
+  transform: Mat4 | null,
+): RawMesh[] {
   const source = extrusion as { getMesh?: (meshType: unknown) => unknown };
   if (!source.getMesh) return [];
   const mesh =
     source.getMesh(rhino.MeshType.Render) ?? source.getMesh(rhino.MeshType.Any);
-  const raw = mesh ? toRawMesh(mesh) : null;
+  const raw = mesh ? toRawMesh(mesh, transform) : null;
   return raw ? [raw] : [];
 }
 
@@ -144,59 +308,255 @@ function typeName(rhino: RhinoModule, objectType: unknown): string {
   return "Unknown";
 }
 
+/** Construction geometry that is never renderable and not worth reporting. */
+function isIgnorable(rhino: RhinoModule, objectType: unknown): boolean {
+  return (
+    objectType === rhino.ObjectType.Curve ||
+    objectType === rhino.ObjectType.Point ||
+    objectType === rhino.ObjectType.PointSet ||
+    objectType === rhino.ObjectType.Annotation ||
+    objectType === rhino.ObjectType.TextDot ||
+    objectType === rhino.ObjectType.Light
+  );
+}
+
+/** Guards against a definition that references itself, directly or via a chain. */
+const MAX_INSTANCE_DEPTH = 8;
+
+interface WalkResult {
+  meshes: RawMesh[];
+  /** Types encountered with no drawable mesh, in walk order. */
+  skipped: string[];
+  instancePlacements: number;
+}
+
+function walkGeometry(
+  rhino: RhinoModule,
+  doc: File3dm,
+  geometry: { objectType: unknown } | null | undefined,
+  transform: Mat4 | null,
+  activeDefinitions: Set<string>,
+  depth: number,
+): WalkResult {
+  const result: WalkResult = { meshes: [], skipped: [], instancePlacements: 0 };
+  if (!geometry) return result;
+
+  const objectType = geometry.objectType;
+
+  if (objectType === rhino.ObjectType.Mesh) {
+    const raw = toRawMesh(geometry, transform);
+    if (raw) result.meshes.push(raw);
+    else result.skipped.push("Mesh");
+    return result;
+  }
+
+  if (objectType === rhino.ObjectType.Brep) {
+    const meshes = meshesFromBrep(rhino, geometry, transform);
+    if (meshes.length > 0) result.meshes.push(...meshes);
+    else result.skipped.push("Brep");
+    return result;
+  }
+
+  if (objectType === rhino.ObjectType.Extrusion) {
+    const meshes = meshesFromExtrusion(rhino, geometry, transform);
+    if (meshes.length > 0) result.meshes.push(...meshes);
+    else result.skipped.push("Extrusion");
+    return result;
+  }
+
+  if (objectType === rhino.ObjectType.InstanceReference) {
+    if (depth >= MAX_INSTANCE_DEPTH) return result;
+
+    const reference = geometry as { parentIdefId?: string; xform?: unknown };
+    const definitionId = reference.parentIdefId;
+    if (!definitionId || activeDefinitions.has(definitionId)) {
+      // Self-referential definition — bail rather than recurse forever.
+      result.skipped.push("InstanceReference");
+      return result;
+    }
+
+    const definition = doc.instanceDefinitions().findId(definitionId) as {
+      getObjectIds?: () => ArrayLike<string>;
+    } | null;
+    if (!definition?.getObjectIds) {
+      result.skipped.push("InstanceReference");
+      return result;
+    }
+
+    const local = reference.xform ? matrixFromXform(reference.xform) : IDENTITY;
+    const composed = transform ? multiply(transform, local) : local;
+    const nextActive = new Set(activeDefinitions).add(definitionId);
+
+    const memberIds = Array.from(definition.getObjectIds() ?? []);
+    let placed = 0;
+    for (const memberId of memberIds) {
+      const member = doc.objects().findId(memberId) as
+        | { geometry: () => { objectType: unknown } | null }
+        | null
+        | undefined;
+      if (!member) continue;
+
+      const nested = walkGeometry(
+        rhino,
+        doc,
+        member.geometry(),
+        isIdentity(composed) ? null : composed,
+        nextActive,
+        depth + 1,
+      );
+      result.meshes.push(...nested.meshes);
+      result.skipped.push(...nested.skipped);
+      result.instancePlacements += nested.instancePlacements;
+      if (nested.meshes.length > 0) placed++;
+    }
+
+    if (placed > 0) result.instancePlacements++;
+    else if (memberIds.length === 0) result.skipped.push("InstanceReference");
+
+    return result;
+  }
+
+  if (!isIgnorable(rhino, objectType)) {
+    result.skipped.push(typeName(rhino, objectType));
+  }
+  return result;
+}
+
+interface Box {
+  min: number[];
+  max: number[];
+}
+
+function boundingBoxOf(geometry: unknown): Box | null {
+  const source = geometry as { getBoundingBox?: (accurate: boolean) => Box | null };
+  if (!source?.getBoundingBox) return null;
+  try {
+    const box = source.getBoundingBox(true);
+    if (!box?.min || !box?.max || box.min.length < 3) return null;
+    return { min: [...box.min], max: [...box.max] };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Whether two boxes describe the same part: a meshed duplicate of a solid
+ * occupies the same space, so matching extents and centres is a far stronger
+ * signal than a shared layer alone (everything tends to sit on layer 0).
+ */
+function boxesMatch(a: Box, b: Box): boolean {
+  const sizeA = [a.max[0] - a.min[0], a.max[1] - a.min[1], a.max[2] - a.min[2]];
+  const sizeB = [b.max[0] - b.min[0], b.max[1] - b.min[1], b.max[2] - b.min[2]];
+  const scale = Math.max(...sizeA, ...sizeB, 1e-6);
+  const tolerance = scale * 0.05;
+
+  for (let axis = 0; axis < 3; axis++) {
+    if (Math.abs(sizeA[axis] - sizeB[axis]) > tolerance) return false;
+    const centerA = (a.min[axis] + a.max[axis]) / 2;
+    const centerB = (b.min[axis] + b.max[axis]) / 2;
+    if (Math.abs(centerA - centerB) > tolerance) return false;
+  }
+  return true;
+}
+
+/** Every object id that belongs to an instance definition rather than the model. */
+function definitionMemberIds(doc: File3dm): Set<string> {
+  const ids = new Set<string>();
+  const definitions = doc.instanceDefinitions();
+  for (let i = 0; i < definitions.count; i++) {
+    const definition = definitions.get(i) as { getObjectIds?: () => ArrayLike<string> };
+    for (const id of Array.from(definition?.getObjectIds?.() ?? [])) ids.add(id);
+  }
+  return ids;
+}
+
 export function extractRenderMeshes(
   rhino: RhinoModule,
   doc: File3dm,
 ): RhinoExtraction {
   const objects = doc.objects();
+  // Definition members also live in the object table. Drawing them directly
+  // would place an untransformed copy at the origin alongside every reference.
+  const memberIds = definitionMemberIds(doc);
+
   const meshes: RawMesh[] = [];
-  const skipped = new Map<string, number>();
+  const skips: { type: string; layerIndex: number; box: Box | null }[] = [];
+  /** Standalone Mesh objects that drew — the only thing that can be a duplicate. */
+  const drawnMeshObjects: { layerIndex: number; box: Box | null }[] = [];
+  let objectCount = 0;
   let meshedObjectCount = 0;
+  let instancePlacements = 0;
 
   for (let i = 0; i < objects.count; i++) {
-    const geometry = objects.get(i)?.geometry() as
-      | { objectType: unknown }
-      | null
-      | undefined;
+    const object = objects.get(i) as {
+      geometry: () => { objectType: unknown } | null;
+      attributes?: () => { id?: string; layerIndex?: number } | null;
+    } | null;
+    if (!object) continue;
+
+    const attributes = object.attributes?.();
+    const id = attributes?.id;
+    if (id && memberIds.has(id)) continue;
+
+    const geometry = object.geometry();
     if (!geometry) continue;
+    if (isIgnorable(rhino, geometry.objectType)) continue;
 
-    const objectType = geometry.objectType;
-    let found: RawMesh[] = [];
+    objectCount++;
+    const layerIndex = attributes?.layerIndex ?? -1;
+    const walked = walkGeometry(rhino, doc, geometry, null, new Set(), 0);
 
-    if (objectType === rhino.ObjectType.Mesh) {
-      const raw = toRawMesh(geometry);
-      if (raw) found = [raw];
-    } else if (objectType === rhino.ObjectType.Brep) {
-      found = meshesFromBrep(rhino, geometry);
-    } else if (objectType === rhino.ObjectType.Extrusion) {
-      found = meshesFromExtrusion(rhino, geometry);
-    } else if (
-      objectType === rhino.ObjectType.Curve ||
-      objectType === rhino.ObjectType.Point ||
-      objectType === rhino.ObjectType.Annotation ||
-      objectType === rhino.ObjectType.TextDot ||
-      objectType === rhino.ObjectType.Light
-    ) {
-      // Construction geometry — never renderable, and not worth reporting.
-      continue;
-    }
-
-    if (found.length > 0) {
-      meshes.push(...found);
+    if (walked.meshes.length > 0) {
+      meshes.push(...walked.meshes);
       meshedObjectCount++;
-    } else {
-      const name = typeName(rhino, objectType);
-      skipped.set(name, (skipped.get(name) ?? 0) + 1);
+      if (geometry.objectType === rhino.ObjectType.Mesh) {
+        drawnMeshObjects.push({ layerIndex, box: boundingBoxOf(geometry) });
+      }
     }
+    instancePlacements += walked.instancePlacements;
+    for (const type of walked.skipped) {
+      skips.push({ type, layerIndex, box: boundingBoxOf(geometry) });
+    }
+  }
+
+  // Second pass: a skipped solid counts as covered when a standalone mesh on
+  // the same layer occupies the same space — i.e. a meshed duplicate of that
+  // part, which is already on screen.
+  const grouped = new Map<string, SkippedGroup>();
+  for (const skip of skips) {
+    const group = grouped.get(skip.type) ?? {
+      type: skip.type,
+      count: 0,
+      coveredByDuplicate: 0,
+    };
+    group.count++;
+
+    const covered =
+      skip.box !== null &&
+      drawnMeshObjects.some(
+        (candidate) =>
+          candidate.layerIndex === skip.layerIndex &&
+          candidate.box !== null &&
+          boxesMatch(candidate.box, skip.box as Box),
+      );
+    if (covered) group.coveredByDuplicate++;
+    grouped.set(skip.type, group);
   }
 
   return {
     meshes,
     unit: resolveUnit(rhino, doc.settings().modelUnitSystem),
-    objectCount: objects.count,
+    objectCount,
     meshedObjectCount,
-    skipped: [...skipped.entries()].map(([type, count]) => ({ type, count })),
+    instancePlacements,
+    skipped: [...grouped.values()],
   };
+}
+
+function inventory(extraction: RhinoExtraction): string {
+  return extraction.skipped
+    .map((entry) => `${entry.count} ${entry.type}${entry.count > 1 ? "s" : ""}`)
+    .join(", ");
 }
 
 /**
@@ -205,14 +565,33 @@ export function extractRenderMeshes(
  * all there, just without the cached meshes any viewer needs.
  */
 export function noRenderMeshesMessage(extraction: RhinoExtraction): string {
-  const inventory = extraction.skipped
-    .map((entry) => `${entry.count} ${entry.type}${entry.count > 1 ? "s" : ""}`)
-    .join(", ");
-
   const found =
     extraction.objectCount === 0
       ? "The file contains no objects."
-      : `Found ${inventory || `${extraction.objectCount} objects`}, but none carry a saved render mesh.`;
+      : `Found ${inventory(extraction) || `${extraction.objectCount} objects`}, but none carry a saved render mesh.`;
 
   return `${found} Re-save from Rhino or Matrix with render meshes included: File → Save As, and untick "Save Small" (or run the Mesh command on the solids first). Viewers can only draw meshes that are already in the file.`;
+}
+
+/**
+ * One line about what was left out of an otherwise successful load, for the
+ * session list. Returns null when everything drew.
+ */
+export function skippedSummary(extraction: RhinoExtraction): string | null {
+  const total = extraction.skipped.reduce((sum, entry) => sum + entry.count, 0);
+  if (total === 0) return null;
+
+  const covered = extraction.skipped.reduce(
+    (sum, entry) => sum + entry.coveredByDuplicate,
+    0,
+  );
+  const detail = inventory(extraction);
+
+  if (covered === total) {
+    return `${detail} had no render mesh — a meshed copy on the same layer is shown instead.`;
+  }
+  if (covered > 0) {
+    return `${detail} had no render mesh (${covered} covered by a meshed copy on the same layer).`;
+  }
+  return `${detail} had no render mesh and ${total > 1 ? "are" : "is"} not shown.`;
 }
