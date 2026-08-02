@@ -13,6 +13,11 @@ import {
   clampRingParams,
   diffRingParams,
 } from "../lib/ring-params.ts";
+import {
+  describeChangedFields,
+  listClampAdjustments,
+  reconcileNote,
+} from "../lib/design-note.ts";
 
 let failures = 0;
 const check = (name, condition, detail = "") => {
@@ -118,6 +123,127 @@ check(
     params({ stoneCarat: 5 }),
     clampRingParams(params({ stoneCarat: 12 })),
   ).length === 0,
+);
+
+// --- the reported bug: note said 1.5ct, store held 1.05ct ------------------
+console.log("\nfull route pipeline (parse → validate → clamp → diff)");
+
+/** Mirrors the ordering in app/api/design-step/route.ts. */
+function runPipeline(currentParams, rawModelReply) {
+  const candidate = JSON.parse(extractJsonObject(rawModelReply));
+  const validated = designStepResponseSchema.safeParse(candidate);
+  if (!validated.success) return { ok: false };
+  const requested = validated.data.updatedParams;
+  const applied = clampRingParams(requested);
+  const changed = diffRingParams(currentParams, applied);
+  const audit = reconcileNote(validated.data.assistantNote, applied, changed);
+  return {
+    ok: true,
+    applied,
+    changed,
+    adjusted: listClampAdjustments(requested, applied),
+    note: audit.note,
+    rewritten: audit.rewritten,
+    conflicts: audit.conflicts,
+  };
+}
+
+// "1.5 carat oval solitaire in rose gold, thin rounded band, six prongs"
+const requestedShape = {
+  stoneCarat: 1.5,
+  stoneShape: "oval",
+  metal: "rose_gold",
+  bandWidthMm: 1.6,
+  bandThicknessMm: 1.1,
+  bandProfile: "rounded",
+  prongCount: 6,
+  halo: false,
+  paveBand: false,
+};
+
+const honest = runPipeline(
+  DEFAULT_RING_PARAMS,
+  reply(requestedShape, {
+    assistantNote: "Set a 1.5ct oval solitaire in rose gold with six prongs.",
+  }),
+);
+check("in-range carat survives validation + clamping", honest.applied.stoneCarat === 1.5,
+  String(honest.applied.stoneCarat));
+check("no clamp adjustments reported", honest.adjusted.length === 0);
+check("consistent note is kept verbatim", honest.rewritten === false);
+check(
+  "changed lists every edited field",
+  ["stoneCarat", "stoneShape", "metal", "bandWidthMm", "bandThicknessMm", "prongCount"].every(
+    (key) => honest.changed.includes(key),
+  ),
+  honest.changed.join(","),
+);
+
+// The divergence as reported: params say 1.05, prose says 1.5.
+const diverged = runPipeline(
+  DEFAULT_RING_PARAMS,
+  reply(
+    { ...requestedShape, stoneCarat: 1.05 },
+    { assistantNote: "Set a 1.5ct oval solitaire in rose gold with six prongs." },
+  ),
+);
+check("applied carat is the one from updatedParams", diverged.applied.stoneCarat === 1.05);
+check("contradicting note is rewritten", diverged.rewritten === true);
+check("conflict is described", diverged.conflicts.some((c) => c.includes("carat")),
+  diverged.conflicts.join("; "));
+check(
+  "replacement note states the applied carat",
+  diverged.note.includes("1.05ct") && !diverged.note.includes("1.5ct"),
+  diverged.note,
+);
+
+// Clamping is the other way applied state can diverge from the request.
+const clamped = runPipeline(
+  DEFAULT_RING_PARAMS,
+  reply({ stoneCarat: 9 }, { assistantNote: "Set a 9ct centre stone." }),
+);
+check("out-of-range carat clamped to 5", clamped.applied.stoneCarat === 5);
+check(
+  "clamp adjustment surfaced",
+  clamped.adjusted.length === 1 &&
+    clamped.adjusted[0].field === "stoneCarat" &&
+    clamped.adjusted[0].requested === "9" &&
+    clamped.adjusted[0].applied === "5",
+  JSON.stringify(clamped.adjusted),
+);
+check("note that quoted the pre-clamp figure is rewritten", clamped.rewritten === true);
+check("rewritten note quotes 5.00ct", clamped.note.includes("5.00ct"), clamped.note);
+
+// --- note reconciliation edge cases ---------------------------------------
+console.log("\nreconcileNote");
+const applied = { ...DEFAULT_RING_PARAMS, stoneCarat: 1.05, prongCount: 6, ringSize: 7 };
+
+const keeps = [
+  ["matching carat", "Set a 1.05ct oval in rose gold."],
+  ["matching prongs", "Moved to six prongs for a more secure setting."],
+  ["numeric prongs", "Moved to 6-prong."],
+  ["matching size", "Kept it at size 7."],
+  ["stone spread in mm", "That is roughly 6.4mm across."],
+  ["no numbers at all", "Switched the metal to rose gold."],
+  ["rounded ring size", "Sized to size 7 for you."],
+];
+for (const [name, note] of keeps) {
+  check(`keeps note — ${name}`, reconcileNote(note, applied, []).rewritten === false, note);
+}
+
+const rewrites = [
+  ["wrong carat", "Set a 1.5ct oval."],
+  ["wrong carat word form", "Set a 2 carat oval."],
+  ["wrong prong count", "Moved to four prongs."],
+  ["wrong ring size", "Sized to size 9."],
+];
+for (const [name, note] of rewrites) {
+  check(`rewrites note — ${name}`, reconcileNote(note, applied, ["stoneCarat"]).rewritten === true, note);
+}
+
+check(
+  "no-op turn produces an honest note",
+  describeChangedFields(applied, []).includes("Nothing changed"),
 );
 
 console.log(

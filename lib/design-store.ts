@@ -1,6 +1,6 @@
 import { create } from "zustand";
 
-import { designStepResponseSchema } from "@/lib/design-step";
+import { designStepResultSchema } from "@/lib/design-step";
 import {
   DEFAULT_RING_PARAMS,
   clampRingParams,
@@ -29,6 +29,8 @@ interface DesignStore {
   changed: (keyof RingParams)[];
   /** Terms the last step couldn't express in the schema. */
   unhandled: string[];
+  /** Values the clamp had to correct on the last step. */
+  adjusted: { field: string; requested: string; applied: string }[];
   error: string | null;
 
   /** Manual control edits. Same entry point the chat ends up at. */
@@ -51,6 +53,7 @@ export const useDesignStore = create<DesignStore>((set, get) => ({
   pending: false,
   changed: [],
   unhandled: [],
+  adjusted: [],
   error: null,
 
   updateParams: (patch) =>
@@ -84,6 +87,7 @@ export const useDesignStore = create<DesignStore>((set, get) => ({
       error: null,
       changed: [],
       unhandled: [],
+      adjusted: [],
     }));
 
     try {
@@ -103,7 +107,7 @@ export const useDesignStore = create<DesignStore>((set, get) => ({
         throw new Error(message);
       }
 
-      const parsed = designStepResponseSchema.safeParse(payload);
+      const parsed = designStepResultSchema.safeParse(payload);
       if (!parsed.success) {
         throw new Error("The designer returned an unexpected response.");
       }
@@ -113,6 +117,7 @@ export const useDesignStore = create<DesignStore>((set, get) => ({
         params: clampRingParams(parsed.data.updatedParams),
         changed: parsed.data.changed.filter(isRingParamKey),
         unhandled: parsed.data.unhandled,
+        adjusted: parsed.data.adjusted,
         messages: [
           ...state.messages,
           {

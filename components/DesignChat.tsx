@@ -18,6 +18,7 @@ export default function DesignChat() {
   const messages = useDesignStore((state) => state.messages);
   const pending = useDesignStore((state) => state.pending);
   const unhandled = useDesignStore((state) => state.unhandled);
+  const adjusted = useDesignStore((state) => state.adjusted);
   const sendMessage = useDesignStore((state) => state.sendMessage);
   const dismissUnhandled = useDesignStore((state) => state.dismissUnhandled);
 
@@ -72,6 +73,19 @@ export default function DesignChat() {
               </div>
             ) : null}
           </div>
+        </div>
+      ) : null}
+
+      {adjusted.length > 0 ? (
+        <div className="mb-2 flex flex-wrap justify-center gap-2">
+          {adjusted.map((item) => (
+            <span
+              key={item.field}
+              className="rounded-full bg-amber-100/90 px-3 py-1 text-xs font-medium text-amber-900 backdrop-blur"
+            >
+              {item.field} kept in range: {item.requested} → {item.applied}
+            </span>
+          ))}
         </div>
       ) : null}
 

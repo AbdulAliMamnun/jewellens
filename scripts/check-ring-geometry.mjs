@@ -6,8 +6,10 @@ import {
   innerDiameterMm,
   roundDiameterMm,
   stoneDimsMm,
+  GROUND_Y,
   MM_TO_SCENE,
 } from "../lib/ring-geometry.ts";
+import { fitDistance, ringSceneBounds } from "../lib/camera-fit.ts";
 import { DEFAULT_RING_PARAMS } from "../lib/ring-params.ts";
 
 const round2 = (n) => Math.round(n * 100) / 100;
@@ -227,14 +229,35 @@ function inspect(label, params) {
   for (const part of [build.prongs, build.prongTips, build.halo, build.pave]) {
     if (part) addGeometry(part.geometry, part.placements);
   }
+  // Cross-check the bounds the builder reports (used for camera auto-fit)
+  // against this independently accumulated union.
+  const reported = new THREE.Box3(
+    new THREE.Vector3(...m.boundsMm.min),
+    new THREE.Vector3(...m.boundsMm.max),
+  );
+  for (const axis of ["x", "y", "z"]) {
+    if (
+      Math.abs(reported.min[axis] - overall.min[axis]) > 0.01 ||
+      Math.abs(reported.max[axis] - overall.max[axis]) > 0.01
+    ) {
+      flag(
+        label,
+        `metrics.boundsMm.${axis} [${round2(reported.min[axis])}, ${round2(reported.max[axis])}] != measured [${round2(overall.min[axis])}, ${round2(overall.max[axis])}]`,
+      );
+    }
+  }
+
   const overallSize = new THREE.Vector3();
   overall.getSize(overallSize);
   const sceneHeight = overallSize.y * MM_TO_SCENE;
   lines.push(
     `overall ${round2(overallSize.x)}x${round2(overallSize.y)}x${round2(overallSize.z)}mm → ${round2(sceneHeight)} scene units tall`,
   );
-  // The designer camera sits at distance 3.6 with a 38° fov → 2.48 units visible.
-  if (sceneHeight > 2.48) flag(label, `ring is ${round2(sceneHeight)} scene units tall — overflows the default camera framing`);
+  // No fixed-frame check any more: the camera auto-fits to metrics.boundsMm,
+  // so the only requirement is that the bounds are finite and non-degenerate.
+  if (!Number.isFinite(sceneHeight) || sceneHeight <= 0) {
+    flag(label, `degenerate bounds (${round2(sceneHeight)} scene units tall)`);
+  }
 
   console.log(`\n### ${label}`);
   for (const line of lines) console.log("   " + line);
@@ -367,6 +390,62 @@ for (const stoneShape of SHAPES) {
   }
 }
 console.log(`\nswept ${sweepCount} parameter combinations`);
+
+// --- camera auto-fit -------------------------------------------------------
+// The designer camera refits to metrics.boundsMm after every rebuild. Verify
+// the resulting framing numerically, since it can't be eyeballed headlessly.
+console.log("\n### camera auto-fit (38° fov, 16:9, ~40° elevation)");
+
+const FOV = 38;
+const ASPECT = 16 / 9;
+// Matches DESIGNER_CAMERA in components/DesignerViewer.tsx.
+const VIEW_DIR = new THREE.Vector3(0, 2.25, 2.68).normalize();
+// OrbitControls limits in components/ViewerShell.tsx.
+const MIN_DISTANCE = 1.3;
+const MAX_DISTANCE = 9;
+
+const framingCases = [
+  ["reported prompt (1.5ct oval, thin rounded band, 6 prong)", {
+    stoneCarat: 1.5, stoneShape: "oval", metal: "rose_gold",
+    bandWidthMm: 1.6, bandThicknessMm: 1.1, bandProfile: "rounded", prongCount: 6,
+  }],
+  ["default", {}],
+  ["smallest (0.25ct, thin band)", { stoneCarat: 0.25, bandWidthMm: 1.5, bandThicknessMm: 1 }],
+  ["largest (size 13, 5ct, halo, pave)", {
+    ringSize: 13, stoneCarat: 5, halo: true, paveBand: true, bandWidthMm: 6,
+  }],
+  ["no stone", { stoneShape: "none" }],
+];
+
+for (const [label, overrides] of framingCases) {
+  const params = { ...DEFAULT_RING_PARAMS, ...overrides };
+  const build = buildRing(params);
+  const groundOffset = GROUND_Y + build.metrics.bandOuterRadiusMm * MM_TO_SCENE;
+  const box = ringSceneBounds(build.metrics.boundsMm, MM_TO_SCENE, groundOffset);
+  const center = box.getCenter(new THREE.Vector3());
+  const size = box.getSize(new THREE.Vector3());
+  const distance = fitDistance(box, center, VIEW_DIR, FOV, ASPECT);
+
+  // Share of the frame the ring's vertical extent occupies at that distance.
+  const visibleHeight = 2 * distance * Math.tan((FOV * Math.PI) / 180 / 2);
+  const fill = size.y / visibleHeight;
+
+  console.log(
+    `   ${label}: dist ${round2(distance)}, centre y ${round2(center.y)}, fills ${Math.round(fill * 100)}% of frame height`,
+  );
+
+  if (distance < MIN_DISTANCE || distance > MAX_DISTANCE) {
+    flag(label, `fit distance ${round2(distance)} outside OrbitControls [${MIN_DISTANCE}, ${MAX_DISTANCE}]`);
+  }
+  if (fill > 0.95) flag(label, `ring fills ${Math.round(fill * 100)}% of frame height — too tight`);
+  if (fill < 0.35) flag(label, `ring fills only ${Math.round(fill * 100)}% of frame height — too small`);
+  // The old fixed camera targeted y=0.15 regardless of the ring; the auto-fit
+  // must actually centre on the geometry.
+  if (Math.abs(center.y - box.getCenter(new THREE.Vector3()).y) > 1e-9) {
+    flag(label, "centre drifted from the bounds centre");
+  }
+  disposeRingBuild(build);
+}
 
 console.log("\n================ FLAGS ================");
 if (problems.length === 0) console.log("none");

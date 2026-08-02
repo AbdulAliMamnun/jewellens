@@ -6,6 +6,7 @@ import {
   designStepResponseSchema,
   extractJsonObject,
 } from "@/lib/design-step";
+import { listClampAdjustments, reconcileNote } from "@/lib/design-note";
 import { clampRingParams, diffRingParams } from "@/lib/ring-params";
 
 /**
@@ -50,6 +51,7 @@ RULES:
 4. Keep every number inside the ranges above.
 5. If a request is ambiguous, choose the most common interpretation for an engagement ring and state the assumption in assistantNote.
 6. assistantNote is ONE short sentence for the customer. No markdown, no lists, no restating the whole design.
+7. assistantNote must describe the values you actually wrote into updatedParams. If you could not honour a requested number, state the number you did use — never repeat the customer's figure back if updatedParams says something else.
 
 OUTPUT FORMAT — a single JSON object and nothing else. No markdown fences, no prose before or after:
 {"updatedParams":{"ringSize":7,"bandWidthMm":2,"bandThicknessMm":1.6,"bandProfile":"rounded","metal":"yellow_gold","stoneShape":"round","stoneCarat":1,"stoneColor":"diamond","prongCount":4,"halo":false,"paveBand":false},"changed":[],"assistantNote":"...","unhandled":[]}`;
@@ -182,14 +184,27 @@ export async function POST(request: Request) {
     }
 
     // Never trust the model's arithmetic or its own "changed" list.
-    const updatedParams = clampRingParams(validated.data.updatedParams);
+    const requestedParams = validated.data.updatedParams;
+    const updatedParams = clampRingParams(requestedParams);
     const changed = diffRingParams(currentParams, updatedParams);
+    const adjusted = listClampAdjustments(requestedParams, updatedParams);
+
+    // The note has to describe the applied state. If any numeric claim in it
+    // disagrees with what was actually applied, it is replaced with a note
+    // generated from the applied params.
+    const audit = reconcileNote(validated.data.assistantNote, updatedParams, changed);
+    if (audit.rewritten) {
+      console.warn(
+        `[design-step] replaced note that contradicted applied params: ${audit.conflicts.join("; ")}`,
+      );
+    }
 
     return NextResponse.json({
       updatedParams,
       changed,
-      assistantNote: validated.data.assistantNote,
+      assistantNote: audit.note,
       unhandled: validated.data.unhandled,
+      adjusted,
     });
   }
 

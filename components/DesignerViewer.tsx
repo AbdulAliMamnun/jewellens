@@ -6,46 +6,23 @@ import DesignChat from "@/components/DesignChat";
 import ParametricRing from "@/components/ParametricRing";
 import RingControlsPanel from "@/components/RingControlsPanel";
 import ViewerShell, { ChromeButton } from "@/components/ViewerShell";
+import { describeRingParams } from "@/lib/design-note";
 import { useDesignStore } from "@/lib/design-store";
-import { getMetalPreset } from "@/lib/metals";
-import { STONE_SHAPES, type RingParams } from "@/lib/ring-params";
 
 /**
- * Looking down at ~58° — elongated cuts read as elongated from here, which they
- * do not from the archive viewer's near-horizontal default.
+ * Only the direction matters — AutoFrame sets the distance and target from the
+ * ring's real bounds on the first frame. ~40° above the horizon: high enough to
+ * see the crown, low enough that the band still reads as a ring rather than a
+ * flattened ellipse (the 58° view this replaced squashed it almost edge-on).
  */
-const DESIGNER_CAMERA: [number, number, number] = [0, 3.05, 1.9];
-const DESIGNER_TARGET: [number, number, number] = [0, 0.15, 0];
+const DESIGNER_CAMERA: [number, number, number] = [0, 2.25, 2.68];
+const DESIGNER_TARGET: [number, number, number] = [0, 0, 0];
 
 /** How long changed controls stay lit after a conversational turn. */
 const HIGHLIGHT_MS = 2600;
 
 export interface DesignerViewerProps {
   className?: string;
-}
-
-function describe(params: RingParams): string {
-  const metal = getMetalPreset(params.metal).label.toLowerCase();
-  const shape =
-    STONE_SHAPES.find((option) => option.value === params.stoneShape)?.label ??
-    params.stoneShape;
-
-  const parts =
-    params.stoneShape === "none"
-      ? ["Plain band"]
-      : [`${params.stoneCarat.toFixed(2)}ct ${shape.toLowerCase()}`];
-
-  parts.push(
-    metal,
-    `size ${params.ringSize % 1 === 0 ? params.ringSize : params.ringSize.toFixed(2)}`,
-  );
-  if (params.stoneShape !== "none" && params.prongCount > 0) {
-    parts.push(`${params.prongCount} prong`);
-  }
-  if (params.halo && params.stoneShape !== "none") parts.push("halo");
-  if (params.paveBand) parts.push("pavé");
-
-  return parts.join(" · ");
 }
 
 /**
@@ -81,7 +58,7 @@ export default function DesignerViewer({ className }: DesignerViewerProps) {
         <div className="pointer-events-auto max-w-full truncate rounded-full bg-white/70 px-3 py-1.5 text-sm font-medium text-zinc-800 shadow-sm backdrop-blur">
           Template design
           <span className="ml-2 text-xs font-normal text-zinc-500">
-            {describe(params)}
+            {describeRingParams(params)}
           </span>
         </div>
       }

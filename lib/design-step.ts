@@ -31,6 +31,22 @@ export const designStepResponseSchema = z.object({
 
 export type DesignStepResponse = z.infer<typeof designStepResponseSchema>;
 
+export const clampAdjustmentSchema = z.object({
+  field: z.string(),
+  requested: z.string(),
+  applied: z.string(),
+});
+
+/**
+ * What the route returns: the validated model reply after clamping, with the
+ * note reconciled against the applied params and any clamp corrections listed.
+ */
+export const designStepResultSchema = designStepResponseSchema.extend({
+  adjusted: z.array(clampAdjustmentSchema).default([]),
+});
+
+export type DesignStepResult = z.infer<typeof designStepResultSchema>;
+
 export const chatTurnSchema = z.object({
   role: z.enum(["user", "assistant"]),
   content: z.string(),

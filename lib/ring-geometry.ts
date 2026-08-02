@@ -530,6 +530,8 @@ export interface RingMetrics {
     centreClearanceMm: number;
   } | null;
   pave: { count: number; stoneDiameterMm: number; minSpacingMm: number } | null;
+  /** Axis-aligned bounds of every part, in millimetres — drives camera auto-fit. */
+  boundsMm: { min: [number, number, number]; max: [number, number, number] };
 }
 
 export interface RingBuild {
@@ -836,13 +838,11 @@ export function buildRing(params: RingParams): RingBuild {
     }
   }
 
+  const parts = { band, stone, prongs, prongTips, halo, pave };
+  const bounds = measureBounds(parts);
+
   return {
-    band,
-    stone,
-    prongs,
-    prongTips,
-    halo,
-    pave,
+    ...parts,
     metrics: {
       innerDiameterMm: innerDiameter,
       bandOuterRadiusMm: outerR,
@@ -851,8 +851,53 @@ export function buildRing(params: RingParams): RingBuild {
       prongs: metricsProngs,
       halo: metricsHalo,
       pave: metricsPave,
+      boundsMm: {
+        min: [bounds.min.x, bounds.min.y, bounds.min.z],
+        max: [bounds.max.x, bounds.max.y, bounds.max.z],
+      },
     },
   };
+}
+
+/**
+ * Union of every part's bounds, with instance transforms applied. The camera
+ * fit needs the real silhouette — a tall halo or a 5ct crown extends well past
+ * the band, and framing on the band alone crops them.
+ */
+function measureBounds(build: Omit<RingBuild, "metrics">): THREE.Box3 {
+  const bounds = new THREE.Box3();
+  const scratch = new THREE.Box3();
+  const matrix = new THREE.Matrix4();
+
+  const add = (geometry: THREE.BufferGeometry, placements?: Placement[]) => {
+    geometry.computeBoundingBox();
+    const box = geometry.boundingBox;
+    if (!box) return;
+    if (!placements) {
+      bounds.union(box);
+      return;
+    }
+    for (const placement of placements) {
+      matrix.compose(
+        new THREE.Vector3(...placement.position),
+        new THREE.Quaternion(...placement.quaternion),
+        new THREE.Vector3(1, 1, 1),
+      );
+      bounds.union(scratch.copy(box).applyMatrix4(matrix));
+    }
+  };
+
+  add(build.band);
+  if (build.stone) {
+    add(build.stone.geometry, [
+      { position: build.stone.position, quaternion: [0, 0, 0, 1] },
+    ]);
+  }
+  for (const part of [build.prongs, build.prongTips, build.halo, build.pave]) {
+    if (part) add(part.geometry, part.placements);
+  }
+
+  return bounds;
 }
 
 export function disposeRingBuild(build: RingBuild): void {
