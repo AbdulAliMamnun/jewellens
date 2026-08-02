@@ -1,25 +1,63 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 
+import ArchiveSidebar from "@/components/ArchiveSidebar";
 import DesignerViewer from "@/components/DesignerViewer";
 import RingViewer from "@/components/RingViewer";
+import { useArchiveStore } from "@/lib/archive-store";
+import { SUPPORTED_EXTENSIONS } from "@/lib/model-loader";
 
 /**
  * Placeholder until F4 drops real ring STLs into /public/models/.
  * F3 will drive the viewer the same way: pass the catalog row's file link as `src`.
  */
 const SAMPLE_MODELS = [
-  { id: "placeholder-ring", label: "Placeholder ring", url: "/models/placeholder-ring.stl" },
+  {
+    id: "placeholder-ring",
+    label: "Placeholder ring",
+    url: "/models/placeholder-ring.stl",
+  },
 ] as const;
 
 type Mode = "archive" | "design";
 
 export default function ViewerWorkbench() {
   const [mode, setMode] = useState<Mode>("archive");
-  const [selected, setSelected] = useState<{ url: string; key: number } | null>(
-    null,
-  );
+
+  const entries = useArchiveStore((state) => state.entries);
+  const activeId = useArchiveStore((state) => state.activeId);
+  const models = useArchiveStore((state) => state.models);
+  const addFiles = useArchiveStore((state) => state.addFiles);
+  const addSample = useArchiveStore((state) => state.addSample);
+
+  const filesInputRef = useRef<HTMLInputElement>(null);
+  const folderInputRef = useRef<HTMLInputElement>(null);
+
+  const activeEntry = entries.find((entry) => entry.id === activeId) ?? null;
+  const activeModel = activeId ? (models[activeId] ?? null) : null;
+  const busy = activeEntry?.status === "loading" || activeEntry?.status === "queued";
+
+  // A .3dm with nothing drawable isn't a failure to hide in a toast — it's the
+  // one thing the user has to act on, so it takes over the empty state.
+  const notice =
+    activeEntry?.status === "error" && activeEntry.error ? (
+      <div className="text-left">
+        <p className="text-base font-medium text-zinc-900">
+          {activeEntry.error.message}
+        </p>
+        {activeEntry.error.detail ? (
+          <p className="mt-2 text-sm leading-relaxed text-zinc-600">
+            {activeEntry.error.detail}
+          </p>
+        ) : null}
+      </div>
+    ) : undefined;
+
+  function handleFiles(files: File[]) {
+    setMode("archive");
+    void addFiles(files);
+  }
 
   return (
     <div className="flex flex-col gap-4">
@@ -31,18 +69,28 @@ export default function ViewerWorkbench() {
             type="button"
             onClick={() => {
               setMode("archive");
-              // The bumped key re-loads the same URL after a manual drop.
-              setSelected((current) => ({
-                url: sample.url,
-                key: (current?.key ?? 0) + 1,
-              }));
+              void addSample(sample.url, sample.label);
             }}
             className="rounded-full border border-zinc-300 bg-white px-3.5 py-1.5 text-sm font-medium text-zinc-700 transition hover:border-zinc-400 hover:bg-zinc-50"
           >
             {sample.label}
           </button>
         ))}
-        <span className="text-sm text-zinc-400">…or drag an STL/OBJ onto the viewer</span>
+        <button
+          type="button"
+          onClick={() => filesInputRef.current?.click()}
+          className="rounded-full border border-zinc-300 bg-white px-3.5 py-1.5 text-sm font-medium text-zinc-700 transition hover:border-zinc-400 hover:bg-zinc-50"
+        >
+          Upload files
+        </button>
+        <button
+          type="button"
+          onClick={() => folderInputRef.current?.click()}
+          className="rounded-full border border-zinc-300 bg-white px-3.5 py-1.5 text-sm font-medium text-zinc-700 transition hover:border-zinc-400 hover:bg-zinc-50"
+        >
+          Upload folder
+        </button>
+        <span className="text-sm text-zinc-400">…or drop files/folders on the viewer</span>
 
         <button
           type="button"
@@ -62,8 +110,44 @@ export default function ViewerWorkbench() {
       {mode === "design" ? (
         <DesignerViewer />
       ) : (
-        <RingViewer src={selected?.url} srcKey={selected?.key} />
+        <div className="flex gap-4">
+          <ArchiveSidebar />
+          <div className="min-w-0 flex-1">
+            <RingViewer
+              model={activeModel}
+              busy={busy}
+              notice={notice}
+              onFiles={handleFiles}
+              title={activeEntry?.name ?? null}
+            />
+          </div>
+        </div>
       )}
+
+      <input
+        ref={filesInputRef}
+        type="file"
+        multiple
+        accept={SUPPORTED_EXTENSIONS.join(",")}
+        className="hidden"
+        onChange={(event) => {
+          handleFiles(Array.from(event.target.files ?? []));
+          event.target.value = "";
+        }}
+      />
+      {/* webkitdirectory is the only way to pick a whole folder from a dialog. */}
+      <input
+        ref={folderInputRef}
+        type="file"
+        multiple
+        // @ts-expect-error — non-standard but supported in every target browser
+        webkitdirectory=""
+        className="hidden"
+        onChange={(event) => {
+          handleFiles(Array.from(event.target.files ?? []));
+          event.target.value = "";
+        }}
+      />
     </div>
   );
 }

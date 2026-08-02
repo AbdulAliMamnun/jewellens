@@ -8,7 +8,10 @@
     "start": "next start",
     "lint": "eslint",
     "check:geometry": "node scripts/check-ring-geometry.mjs",
-    "check:design": "node scripts/check-design-step.mjs"
+    "check:design": "node scripts/check-design-step.mjs",
+    "predev": "node scripts/copy-rhino3dm.mjs",
+    "prebuild": "node scripts/copy-rhino3dm.mjs",
+    "check:3dm": "node scripts/make-test-3dm.mjs && node scripts/check-3dm.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.115.0",
@@ -17,6 +20,7 @@
     "next": "16.2.12",
     "react": "19.2.4",
     "react-dom": "19.2.4",
+    "rhino3dm": "^8.32.1",
     "three": "^0.185.1",
     "zod": "^4.4.3",
     "zustand": "^5.0.14"

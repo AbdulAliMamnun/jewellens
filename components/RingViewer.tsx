@@ -1,8 +1,16 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState, type DragEvent } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type DragEvent,
+  type ReactNode,
+} from "react";
 
 import ViewerShell from "@/components/ViewerShell";
+import { filesFromDrop } from "@/lib/file-drop";
 import {
   DEFAULT_METAL,
   METAL_PRESETS,
@@ -32,6 +40,21 @@ export interface RingViewerProps {
   className?: string;
   /** Called with a human-readable message whenever a load fails. */
   onError?: (message: string) => void;
+  /**
+   * Controlled mode: when supplied (including `null`), the viewer renders this
+   * model and does no loading of its own. Uncontrolled callers — passing only
+   * `src` or dropping a file — keep the original behaviour.
+   */
+  model?: LoadedModel | null;
+  /** Controlled loading indicator. */
+  busy?: boolean;
+  /** Replaces the empty state, e.g. an actionable message about the last file. */
+  notice?: ReactNode;
+  /**
+   * Receives every dropped or browsed file, including the contents of dropped
+   * folders. Supplying this switches drops from single-file to multi-file.
+   */
+  onFiles?: (files: File[]) => void;
 }
 
 type ModelSource =
@@ -55,7 +78,12 @@ export default function RingViewer({
   title,
   className,
   onError,
+  model: controlledModel,
+  busy,
+  notice,
+  onFiles,
 }: RingViewerProps) {
+  const isControlled = controlledModel !== undefined;
   const [dropped, setDropped] = useState<{
     file: File;
     id: string;
@@ -81,11 +109,12 @@ export default function RingViewer({
   // The active source is derived, never mirrored into state: a drop wins until
   // the caller points the viewer at a different model.
   const source = useMemo<ModelSource | null>(() => {
+    if (isControlled) return null;
     if (dropped && dropped.overrides === srcId) {
       return { id: dropped.id, kind: "file", file: dropped.file };
     }
     return src ? { id: srcId, kind: "url", url: src } : null;
-  }, [dropped, src, srcId]);
+  }, [dropped, isControlled, src, srcId]);
 
   useEffect(() => {
     if (!source) return;
@@ -129,23 +158,36 @@ export default function RingViewer({
   }, [entry]);
 
   const metal = getMetalPreset(metalId);
-  const model = entry?.model ?? null;
-  const errorMessage =
-    error && (error.sourceId === null || error.sourceId === source?.id)
+  const model = isControlled ? controlledModel : (entry?.model ?? null);
+  const errorMessage = isControlled
+    ? null
+    : error && (error.sourceId === null || error.sourceId === source?.id)
       ? error.message
       : null;
-  const status: "empty" | "loading" | "ready" | "error" = errorMessage
-    ? "error"
-    : entry && source && entry.sourceId === source.id
-      ? "ready"
-      : source
-        ? "loading"
-        : "empty";
+  const status: "empty" | "loading" | "ready" | "error" = isControlled
+    ? busy
+      ? "loading"
+      : model
+        ? "ready"
+        : "empty"
+    : errorMessage
+      ? "error"
+      : entry && source && entry.sourceId === source.id
+        ? "ready"
+        : source
+          ? "loading"
+          : "empty";
 
-  function acceptFile(file: File | undefined) {
-    if (!file) return;
+  function acceptFiles(files: File[]) {
+    if (files.length === 0) return;
+    if (onFiles) {
+      onFiles(files);
+      return;
+    }
+
+    const file = files[0];
     if (!isSupportedFile(file.name)) {
-      const message = `${file.name} isn't supported — use an ${SUPPORTED_EXTENSIONS.join(" or ")} file.`;
+      const message = `${file.name} isn't supported — use an ${SUPPORTED_EXTENSIONS.join(", ")} file.`;
       setError({ sourceId: null, message });
       onErrorRef.current?.(message);
       return;
@@ -175,7 +217,14 @@ export default function RingViewer({
     event.preventDefault();
     dragDepth.current = 0;
     setIsDragging(false);
-    acceptFile(event.dataTransfer.files[0]);
+
+    if (!onFiles) {
+      acceptFiles(Array.from(event.dataTransfer.files));
+      return;
+    }
+    // Folders only surface through the entries API, and the DataTransfer is
+    // neutered once this handler returns — so hand it over before awaiting.
+    void filesFromDrop(event.dataTransfer).then(acceptFiles);
   }
 
   const label = title ?? model?.label ?? null;
@@ -225,20 +274,26 @@ export default function RingViewer({
         <>
           {!model && status !== "loading" ? (
             <div className="pointer-events-none absolute inset-0 flex items-center justify-center p-8">
-              <div className="pointer-events-auto rounded-2xl border border-dashed border-zinc-400/70 bg-white/60 px-8 py-7 text-center backdrop-blur">
-                <p className="text-base font-medium text-zinc-800">
-                  Drop a ring model here
-                </p>
-                <p className="mt-1 text-sm text-zinc-500">
-                  STL or OBJ — auto-centered and scaled to fit
-                </p>
-                <button
-                  type="button"
-                  onClick={() => fileInputRef.current?.click()}
-                  className="mt-4 rounded-full bg-zinc-900 px-4 py-2 text-sm font-medium text-white transition hover:bg-zinc-700"
-                >
-                  Browse files
-                </button>
+              <div className="pointer-events-auto max-w-md rounded-2xl border border-dashed border-zinc-400/70 bg-white/70 px-8 py-7 text-center backdrop-blur">
+                {notice ?? (
+                  <>
+                    <p className="text-base font-medium text-zinc-800">
+                      {onFiles
+                        ? "Drop ring models or a folder here"
+                        : "Drop a ring model here"}
+                    </p>
+                    <p className="mt-1 text-sm text-zinc-500">
+                      STL, OBJ or 3DM — auto-centered and scaled to fit
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => fileInputRef.current?.click()}
+                      className="mt-4 rounded-full bg-zinc-900 px-4 py-2 text-sm font-medium text-white transition hover:bg-zinc-700"
+                    >
+                      Browse files
+                    </button>
+                  </>
+                )}
               </div>
             </div>
           ) : null}
@@ -277,7 +332,7 @@ export default function RingViewer({
           {isDragging ? (
             <div className="pointer-events-none absolute inset-4 flex items-center justify-center rounded-xl border-2 border-dashed border-zinc-900/40 bg-white/50 backdrop-blur-[1px]">
               <p className="text-base font-medium text-zinc-800">
-                Release to load model
+                {onFiles ? "Release to add to this session" : "Release to load model"}
               </p>
             </div>
           ) : null}
@@ -285,10 +340,11 @@ export default function RingViewer({
           <input
             ref={fileInputRef}
             type="file"
+            multiple={Boolean(onFiles)}
             accept={SUPPORTED_EXTENSIONS.join(",")}
             className="hidden"
             onChange={(event) => {
-              acceptFile(event.target.files?.[0]);
+              acceptFiles(Array.from(event.target.files ?? []));
               event.target.value = "";
             }}
           />

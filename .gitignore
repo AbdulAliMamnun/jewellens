@@ -39,3 +39,7 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# generated: staged wasm + synthetic .3dm fixtures
+/public/rhino3dm/
+/public/models/test-3dm/

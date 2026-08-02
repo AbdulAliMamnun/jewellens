@@ -2,12 +2,44 @@ import * as THREE from "three";
 import { STLLoader } from "three/addons/loaders/STLLoader.js";
 import { OBJLoader } from "three/addons/loaders/OBJLoader.js";
 
-export type ModelFormat = "stl" | "obj";
+// Relative + extension-bearing so scripts/check-3dm.mjs can import this module
+// under Node's type stripping.
+import {
+  extractRenderMeshes,
+  noRenderMeshesMessage,
+  type RawMesh,
+} from "./rhino-extract.ts";
 
-export const SUPPORTED_EXTENSIONS = [".stl", ".obj"] as const;
+export type ModelFormat = "stl" | "obj" | "3dm";
+
+export const SUPPORTED_EXTENSIONS = [".stl", ".obj", ".3dm"] as const;
 
 /** Every loaded model is normalized to fit a box of this size, centered on the origin. */
 export const FIT_SIZE = 2;
+
+/** Files above this size get an explicit confirmation before they are parsed. */
+export const LARGE_FILE_BYTES = 50 * 1024 * 1024;
+
+export type ModelLoadErrorCode =
+  | "unsupported"
+  | "no-render-meshes"
+  | "parse"
+  | "fetch"
+  | "empty";
+
+/** Carries a machine-readable cause so the UI can react to each failure differently. */
+export class ModelLoadError extends Error {
+  readonly code: ModelLoadErrorCode;
+  /** Extra guidance shown under the headline message. */
+  readonly detail?: string;
+
+  constructor(code: ModelLoadErrorCode, message: string, detail?: string) {
+    super(message);
+    this.name = "ModelLoadError";
+    this.code = code;
+    this.detail = detail;
+  }
+}
 
 export interface LoadedModel {
   /** Normalized, world-space geometry — render each as a plain `<mesh>`. */
@@ -17,12 +49,27 @@ export interface LoadedModel {
   triangleCount: number;
   /** Bounding box of the source model before normalization, in file units. */
   sourceSize: { x: number; y: number; z: number };
+  /**
+   * Real-world size in millimetres. Exact for .3dm (converted from the file's
+   * declared unit system); assumed for STL/OBJ, which carry no units.
+   */
+  sizeMm: { x: number; y: number; z: number };
+  /** What the millimetre figures are based on — shown next to the dimensions. */
+  unitLabel: string;
+  unitAssumed: boolean;
+}
+
+export interface LoadOptions {
+  /** 0..1 across reading and parsing. */
+  onProgress?: (progress: number) => void;
+  signal?: AbortSignal;
 }
 
 export function formatFromName(name: string): ModelFormat | null {
   const lower = name.toLowerCase();
   if (lower.endsWith(".stl")) return "stl";
   if (lower.endsWith(".obj")) return "obj";
+  if (lower.endsWith(".3dm")) return "3dm";
   return null;
 }
 
@@ -70,7 +117,7 @@ function normalize(geometries: THREE.BufferGeometry[]): THREE.Vector3 {
     if (geometry.boundingBox) bounds.union(geometry.boundingBox);
   }
   if (bounds.isEmpty()) {
-    throw new Error("The file parsed, but contains no geometry.");
+    throw new ModelLoadError("empty", "The file parsed, but contains no geometry.");
   }
 
   const size = bounds.getSize(new THREE.Vector3());
@@ -100,15 +147,12 @@ function countTriangles(geometries: THREE.BufferGeometry[]): number {
   return Math.round(vertices / 3);
 }
 
-function build(format: ModelFormat, label: string, data: ArrayBuffer): LoadedModel {
-  let parsed: THREE.Object3D;
-  try {
-    parsed = parse(format, data);
-  } catch {
-    throw new Error(`Could not parse ${label} as ${format.toUpperCase()}.`);
-  }
-
-  const geometries = collectGeometries(parsed);
+function finish(
+  geometries: THREE.BufferGeometry[],
+  format: ModelFormat,
+  label: string,
+  unit: { scaleToMm: number; label: string; assumed: boolean },
+): LoadedModel {
   const sourceSize = normalize(geometries);
 
   return {
@@ -117,17 +161,189 @@ function build(format: ModelFormat, label: string, data: ArrayBuffer): LoadedMod
     format,
     triangleCount: countTriangles(geometries),
     sourceSize: { x: sourceSize.x, y: sourceSize.y, z: sourceSize.z },
+    sizeMm: {
+      x: sourceSize.x * unit.scaleToMm,
+      y: sourceSize.y * unit.scaleToMm,
+      z: sourceSize.z * unit.scaleToMm,
+    },
+    unitLabel: unit.label,
+    unitAssumed: unit.assumed,
   };
 }
 
-export async function loadModelFromFile(file: File): Promise<LoadedModel> {
-  const format = formatFromName(file.name);
-  if (!format) {
-    throw new Error(
-      `${file.name} is not a supported model — use ${SUPPORTED_EXTENSIONS.join(" or ")}.`,
+/** STL and OBJ carry no unit declaration; jewelry CAD exports are millimetres. */
+const ASSUMED_MM = { scaleToMm: 1, label: "mm", assumed: true };
+
+function buildMesh(format: "stl" | "obj", label: string, data: ArrayBuffer): LoadedModel {
+  let parsed: THREE.Object3D;
+  try {
+    parsed = parse(format, data);
+  } catch {
+    throw new ModelLoadError(
+      "parse",
+      `Could not parse ${label} as ${format.toUpperCase()}.`,
     );
   }
-  return build(format, file.name, await file.arrayBuffer());
+  return finish(collectGeometries(parsed), format, label, ASSUMED_MM);
+}
+
+// ---------------------------------------------------------------------------
+// .3dm (Rhino / Matrix)
+// ---------------------------------------------------------------------------
+
+type RhinoModule = Awaited<ReturnType<typeof import("rhino3dm").default>>;
+
+/** Where scripts/copy-rhino3dm.mjs stages the WASM build. */
+const RHINO_MODULE_URL = "/rhino3dm/rhino3dm.module.min.js";
+
+let rhinoPromise: Promise<RhinoModule> | null = null;
+
+/**
+ * Loads the 2.6MB rhino3dm WASM on first use only, straight from /public rather
+ * than through the bundler — the emscripten glue resolves its own .wasm sibling
+ * and does not survive being bundled.
+ */
+function getRhino(): Promise<RhinoModule> {
+  if (!rhinoPromise) {
+    rhinoPromise = (async () => {
+      const specifier = RHINO_MODULE_URL;
+      const loaded = (await import(/* turbopackIgnore: true */ specifier)) as {
+        default: (config?: { locateFile?: (path: string) => string }) => Promise<RhinoModule>;
+      };
+      return loaded.default({ locateFile: (path) => `/rhino3dm/${path}` });
+    })().catch((cause) => {
+      rhinoPromise = null;
+      throw new ModelLoadError(
+        "parse",
+        "Could not load the Rhino reader.",
+        cause instanceof Error ? cause.message : undefined,
+      );
+    });
+  }
+  return rhinoPromise;
+}
+
+function geometryFromRawMesh(mesh: RawMesh): THREE.BufferGeometry {
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.BufferAttribute(mesh.position, 3));
+  if (mesh.normal && mesh.normal.length === mesh.position.length) {
+    geometry.setAttribute("normal", new THREE.BufferAttribute(mesh.normal, 3));
+  }
+  geometry.setIndex(new THREE.BufferAttribute(mesh.index, 1));
+  if (!mesh.normal) geometry.computeVertexNormals();
+  return geometry;
+}
+
+async function build3dm(label: string, data: ArrayBuffer): Promise<LoadedModel> {
+  const rhino = await getRhino();
+
+  let doc: ReturnType<RhinoModule["File3dm"]["fromByteArray"]> | null;
+  try {
+    doc = rhino.File3dm.fromByteArray(new Uint8Array(data));
+  } catch (cause) {
+    throw new ModelLoadError(
+      "parse",
+      `Could not read ${label} as a Rhino file.`,
+      cause instanceof Error ? cause.message : undefined,
+    );
+  }
+  if (!doc) {
+    throw new ModelLoadError(
+      "parse",
+      `Could not read ${label} as a Rhino file.`,
+      "The file may be corrupt, or saved by a Rhino version this reader doesn't support.",
+    );
+  }
+
+  const extraction = extractRenderMeshes(rhino, doc);
+
+  if (extraction.meshes.length === 0) {
+    throw new ModelLoadError(
+      "no-render-meshes",
+      `${label} has no render meshes to display.`,
+      noRenderMeshesMessage(extraction),
+    );
+  }
+
+  const geometries = extraction.meshes.map(geometryFromRawMesh);
+  const unit = extraction.unit;
+
+  return finish(geometries, "3dm", label, {
+    scaleToMm: unit?.scaleToMm ?? 1,
+    label: unit ? unitAbbreviation(unit.name) : "mm",
+    assumed: unit === null,
+  });
+}
+
+function unitAbbreviation(name: string): string {
+  const abbreviations: Record<string, string> = {
+    Millimeters: "mm",
+    Centimeters: "cm",
+    Decimeters: "dm",
+    Meters: "m",
+    Inches: "in",
+    Feet: "ft",
+    Microns: "µm",
+    Mils: "mil",
+  };
+  return abbreviations[name] ?? name;
+}
+
+// ---------------------------------------------------------------------------
+// Entry points
+// ---------------------------------------------------------------------------
+
+/** Reads a File with progress. `file.arrayBuffer()` reports none, which is no use for 50MB CAD. */
+function readWithProgress(
+  file: File,
+  onProgress?: (progress: number) => void,
+  signal?: AbortSignal,
+): Promise<ArrayBuffer> {
+  if (!onProgress) return file.arrayBuffer();
+
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onprogress = (event) => {
+      if (event.lengthComputable) onProgress(event.loaded / event.total);
+    };
+    reader.onload = () => resolve(reader.result as ArrayBuffer);
+    reader.onerror = () =>
+      reject(new ModelLoadError("parse", `Could not read ${file.name} from disk.`));
+    reader.onabort = () => reject(new DOMException("Aborted", "AbortError"));
+    signal?.addEventListener("abort", () => reader.abort(), { once: true });
+    reader.readAsArrayBuffer(file);
+  });
+}
+
+export async function loadModelFromFile(
+  file: File,
+  options: LoadOptions = {},
+): Promise<LoadedModel> {
+  const format = formatFromName(file.name);
+  if (!format) {
+    throw new ModelLoadError(
+      "unsupported",
+      `${file.name} is not a supported model — use ${SUPPORTED_EXTENSIONS.join(", ")}.`,
+    );
+  }
+
+  // Reading is most of the wall clock on big files; parsing is the last stretch.
+  const data = await readWithProgress(
+    file,
+    options.onProgress ? (progress) => options.onProgress?.(progress * 0.85) : undefined,
+    options.signal,
+  );
+  options.onProgress?.(0.85);
+
+  if (format === "3dm") {
+    const model = await build3dm(file.name, data);
+    options.onProgress?.(1);
+    return model;
+  }
+
+  const model = buildMesh(format, file.name, data);
+  options.onProgress?.(1);
+  return model;
 }
 
 export async function loadModelFromUrl(
@@ -137,8 +353,9 @@ export async function loadModelFromUrl(
   const label = decodeURIComponent(url.split("/").pop() || url);
   const format = formatFromName(label);
   if (!format) {
-    throw new Error(
-      `${label} is not a supported model — use ${SUPPORTED_EXTENSIONS.join(" or ")}.`,
+    throw new ModelLoadError(
+      "unsupported",
+      `${label} is not a supported model — use ${SUPPORTED_EXTENSIONS.join(", ")}.`,
     );
   }
 
@@ -147,13 +364,17 @@ export async function loadModelFromUrl(
     response = await fetch(url, { signal });
   } catch (cause) {
     if (cause instanceof DOMException && cause.name === "AbortError") throw cause;
-    throw new Error(`Could not reach ${url}.`);
+    throw new ModelLoadError("fetch", `Could not reach ${url}.`);
   }
   if (!response.ok) {
-    throw new Error(`Could not load ${label} (HTTP ${response.status}).`);
+    throw new ModelLoadError(
+      "fetch",
+      `Could not load ${label} (HTTP ${response.status}).`,
+    );
   }
 
-  return build(format, label, await response.arrayBuffer());
+  const data = await response.arrayBuffer();
+  return format === "3dm" ? build3dm(label, data) : buildMesh(format, label, data);
 }
 
 /** Releases GPU memory. Call when a model is swapped out or the viewer unmounts. */
