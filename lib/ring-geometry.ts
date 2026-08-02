@@ -1,5 +1,10 @@
 import * as THREE from "three";
-import type { BandProfile, RingParams, StoneShape } from "@/lib/ring-params";
+import type {
+  BandProfile,
+  PaveCoverage,
+  RingParams,
+  StoneShape,
+} from "@/lib/ring-params";
 
 /**
  * All ring geometry is authored in millimeters — real jewelry dimensions — and
@@ -66,6 +71,13 @@ const SHAPE_SPREAD: Record<
   cushion: { width: 0.9, length: 0.9, depthOfWidth: 0.68 },
   emerald: { width: 0.72, length: 1.04, depthOfWidth: 0.66 },
   pear: { width: 0.8, length: 1.26, depthOfWidth: 0.62 },
+  // Square brilliant: face-up spread is smaller than a round of the same weight
+  // because the depth carries more of it.
+  princess: { width: 0.86, length: 0.86, depthOfWidth: 0.73 },
+  // Rectangular brilliant, cut corners; typical L/W around 1.25.
+  radiant: { width: 0.79, length: 0.99, depthOfWidth: 0.69 },
+  // Long and shallow — a marquise spreads further than any other cut.
+  marquise: { width: 0.68, length: 1.36, depthOfWidth: 0.6 },
 };
 
 export interface StoneDimsMm {
@@ -131,12 +143,57 @@ const pearOutline: Outline = (u) => {
   return { x: Math.sin(t) * Math.sin(t / 2), z: Math.cos(t) };
 };
 
-const OUTLINES: Record<CutShape, Outline> = {
+/**
+ * Boat/eye shape, pointed at both ends. sin·|sin| makes x fall off as the
+ * square of the angle near t=0 and t=π, which is what produces a true point
+ * rather than a rounded end.
+ */
+const marquiseOutline: Outline = (u) => {
+  const t = u * TAU;
+  return { x: Math.sin(t) * Math.abs(Math.sin(t)), z: Math.cos(t) };
+};
+
+/**
+ * Outlines with real corners are given as polygons, not parametric curves:
+ * sampling a parametric square rounds the corners off at any resolution, and a
+ * princess is nothing but its corners.
+ */
+type OutlineSpec = Outline | { corners: Point2[] };
+
+/** Rectangle with the corners cut off — the radiant/emerald family silhouette. */
+function cutCornerRectangle(cut: number): { corners: Point2[] } {
+  const outer = 0.5;
+  const inner = 0.5 - cut;
+  return {
+    corners: [
+      { x: outer, z: inner },
+      { x: inner, z: outer },
+      { x: -inner, z: outer },
+      { x: -outer, z: inner },
+      { x: -outer, z: -inner },
+      { x: -inner, z: -outer },
+      { x: inner, z: -outer },
+      { x: outer, z: -inner },
+    ],
+  };
+}
+
+const OUTLINES: Record<CutShape, OutlineSpec> = {
   round: circleOutline,
   oval: circleOutline, // elongation comes from lengthMm
   cushion: superellipseOutline(3.4),
   emerald: superellipseOutline(6),
   pear: pearOutline,
+  princess: {
+    corners: [
+      { x: 0.5, z: 0.5 },
+      { x: -0.5, z: 0.5 },
+      { x: -0.5, z: -0.5 },
+      { x: 0.5, z: -0.5 },
+    ],
+  },
+  radiant: cutCornerRectangle(0.16),
+  marquise: marquiseOutline,
 };
 
 /** How many segments the girdle is faceted into — lower reads as a step cut. */
@@ -146,7 +203,21 @@ const OUTLINE_SEGMENTS: Record<CutShape, number> = {
   cushion: 24,
   emerald: 16,
   pear: 40,
+  princess: 8,
+  radiant: 16,
+  marquise: 40,
 };
+
+/**
+ * Tips sharp enough that a plain prong would slide off, so a prong is forced
+ * onto each one — the V-prong the trade uses to protect these cuts.
+ * Angles are bearings in the stone's XZ plane; +Z is along the finger.
+ */
+function protectedAngles(shape: CutShape): number[] {
+  if (shape === "pear") return [Math.PI / 2];
+  if (shape === "marquise") return [Math.PI / 2, -Math.PI / 2];
+  return [];
+}
 
 function signedArea(points: Point2[]): number {
   let area = 0;
@@ -159,13 +230,43 @@ function signedArea(points: Point2[]): number {
 }
 
 /**
+ * Walks a corner list, subdividing each edge in proportion to its length. Every
+ * corner is emitted exactly, at any sample count — a princess with softened
+ * corners is not a princess.
+ */
+function samplePolygon(corners: Point2[], samples: number): Point2[] {
+  const edgeLengths = corners.map((corner, i) => {
+    const next = corners[(i + 1) % corners.length];
+    return Math.hypot(next.x - corner.x, next.z - corner.z);
+  });
+  const perimeter = edgeLengths.reduce((sum, length) => sum + length, 0) || 1;
+
+  const points: Point2[] = [];
+  for (let i = 0; i < corners.length; i++) {
+    const from = corners[i];
+    const to = corners[(i + 1) % corners.length];
+    const steps = Math.max(1, Math.round((edgeLengths[i] / perimeter) * samples));
+    for (let step = 0; step < steps; step++) {
+      const t = step / steps;
+      points.push({
+        x: from.x + (to.x - from.x) * t,
+        z: from.z + (to.z - from.z) * t,
+      });
+    }
+  }
+  return points;
+}
+
+/**
  * Samples an outline into a polygon normalized to half-extents of 0.5 on both
  * axes and wound counter-clockwise (seen from +Y), which is what the surface
  * builders below assume for outward-facing normals.
  */
-function sampleOutline(outline: Outline, samples = OUTLINE_SAMPLES): Point2[] {
-  const raw: Point2[] = [];
-  for (let i = 0; i < samples; i++) raw.push(outline(i / samples));
+function sampleOutline(outline: OutlineSpec, samples = OUTLINE_SAMPLES): Point2[] {
+  const raw: Point2[] =
+    typeof outline === "function"
+      ? Array.from({ length: samples }, (_, i) => outline(i / samples))
+      : samplePolygon(outline.corners, samples);
 
   let maxX = 0;
   let maxZ = 0;
@@ -333,6 +434,8 @@ function revolveClosedProfile(
   profile: ProfilePoint[],
   segments: number,
   creased: boolean,
+  /** Optional per-angle radial swell, e.g. cathedral shoulders. */
+  radialExtension?: (radius: number, angle: number) => number,
 ): THREE.BufferGeometry {
   const rings = profile.length;
   const positions: number[] = [];
@@ -341,7 +444,8 @@ function revolveClosedProfile(
   const pushRing = (point: ProfilePoint) => {
     for (let i = 0; i < segments; i++) {
       const angle = (i / segments) * TAU;
-      positions.push(point.x * Math.cos(angle), point.y, point.x * Math.sin(angle));
+      const radius = point.x + (radialExtension?.(point.x, angle) ?? 0);
+      positions.push(radius * Math.cos(angle), point.y, radius * Math.sin(angle));
     }
   };
 
@@ -372,6 +476,75 @@ function revolveClosedProfile(
         index.push(a, b, c, a, c, d);
       }
     }
+  }
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+  geometry.setIndex(index);
+  geometry.computeVertexNormals();
+  return geometry;
+}
+
+/**
+ * A closed rim: two concentric outlines extruded between two heights, capped
+ * top and bottom. This is the bezel — a wall of metal following the girdle.
+ * Winding is chosen so every face points away from the metal.
+ */
+function buildRim(
+  inner: Point2[],
+  outer: Point2[],
+  yBottom: number,
+  yTop: number,
+): THREE.BufferGeometry {
+  const segments = Math.min(inner.length, outer.length);
+  const positions: number[] = [];
+  const index: number[] = [];
+
+  // Four vertices per segment: inner/outer × bottom/top.
+  for (let i = 0; i < segments; i++) {
+    const innerPoint = inner[Math.floor((i / segments) * inner.length)];
+    const outerPoint = outer[Math.floor((i / segments) * outer.length)];
+    positions.push(innerPoint.x, yBottom, innerPoint.z);
+    positions.push(innerPoint.x, yTop, innerPoint.z);
+    positions.push(outerPoint.x, yBottom, outerPoint.z);
+    positions.push(outerPoint.x, yTop, outerPoint.z);
+  }
+
+  const INNER_BOTTOM = 0;
+  const INNER_TOP = 1;
+  const OUTER_BOTTOM = 2;
+  const OUTER_TOP = 3;
+
+  for (let i = 0; i < segments; i++) {
+    const base = i * 4;
+    const next = ((i + 1) % segments) * 4;
+    const quad = (a: number, b: number, c: number, d: number) => {
+      index.push(a, b, c, a, c, d);
+    };
+
+    // Outer wall faces away from the axis.
+    quad(
+      base + OUTER_BOTTOM,
+      base + OUTER_TOP,
+      next + OUTER_TOP,
+      next + OUTER_BOTTOM,
+    );
+    // Inner wall faces the stone.
+    quad(
+      base + INNER_BOTTOM,
+      next + INNER_BOTTOM,
+      next + INNER_TOP,
+      base + INNER_TOP,
+    );
+    // Top rim faces up.
+    quad(base + INNER_TOP, next + INNER_TOP, next + OUTER_TOP, base + OUTER_TOP);
+    // Bottom rim faces down.
+    quad(
+      base + INNER_BOTTOM,
+      base + OUTER_BOTTOM,
+      next + OUTER_BOTTOM,
+      next + INNER_BOTTOM,
+    );
   }
 
   const geometry = new THREE.BufferGeometry();
@@ -530,6 +703,14 @@ export interface RingMetrics {
     centreClearanceMm: number;
   } | null;
   pave: { count: number; stoneDiameterMm: number; minSpacingMm: number } | null;
+  bezel: {
+    wallMm: number;
+    risesAboveGirdleMm: number;
+    sitsBelowGirdleMm: number;
+    girdleBiteMm: number;
+  } | null;
+  /** How far the cathedral shoulders lift the head above the shank. */
+  cathedralRiseMm: number;
   /** Axis-aligned bounds of every part, in millimetres — drives camera auto-fit. */
   boundsMm: { min: [number, number, number]; max: [number, number, number] };
 }
@@ -541,6 +722,8 @@ export interface RingBuild {
   prongs: InstancedPart | null;
   /** Claw beads capping each prong, straddling the girdle edge. */
   prongTips: InstancedPart | null;
+  /** Metal rim encircling the girdle, when settingType is "bezel". */
+  bezel: THREE.BufferGeometry | null;
   halo: InstancedPart | null;
   pave: InstancedPart | null;
   metrics: RingMetrics;
@@ -587,18 +770,49 @@ export function buildRing(params: RingParams): RingBuild {
   const outerR = innerR + params.bandThicknessMm;
   const halfWidth = params.bandWidthMm / 2;
 
-  const band = revolveClosedProfile(
-    bandProfilePoints(params.bandProfile, innerR, outerR, halfWidth),
-    128,
-    params.bandProfile !== "rounded",
-  ).rotateX(Math.PI / 2); // hole axis Y → Z, so the ring stands upright
-
   const hasStone = params.stoneShape !== "none";
   const shape = hasStone ? (params.stoneShape as CutShape) : null;
   const dims = shape ? stoneDimsMm(shape, params.stoneCarat) : null;
 
+  // A cathedral lifts the head and lets the shoulders sweep up to meet it. The
+  // rise has to be known before the band is built, since it shapes the shank.
+  const cathedralRise =
+    params.cathedral && dims ? Math.min(2.4, Math.max(0.9, dims.depthMm * 0.4)) : 0;
+
+  /**
+   * Extra outer radius at revolve angle `phi`, tapering off away from the top.
+   * The bore is untouched — `outerness` is 0 at the inner face.
+   */
+  const archExtension =
+    cathedralRise > 0
+      ? (radius: number, phi: number) => {
+          // After the Z-axis rotation the top of the ring sits at phi = -π/2.
+          const bump = Math.max(0, -Math.sin(phi)) ** 2;
+          const outerness = Math.min(
+            1,
+            Math.max(0, (radius - innerR) / Math.max(1e-6, outerR - innerR)),
+          );
+          return cathedralRise * bump * outerness;
+        }
+      : undefined;
+
+  const band = revolveClosedProfile(
+    bandProfilePoints(params.bandProfile, innerR, outerR, halfWidth),
+    128,
+    params.bandProfile !== "rounded",
+    archExtension,
+  ).rotateX(Math.PI / 2); // hole axis Y → Z, so the ring stands upright
+
+  /** Outer radius of the shank at a given horizontal offset from the ring's axis. */
+  const archedRadiusAt = (offsetX: number) => {
+    if (cathedralRise === 0) return outerR;
+    const fromTop = Math.asin(Math.min(1, Math.max(-1, offsetX / outerR)));
+    return outerR + cathedralRise * Math.cos(fromTop) ** 2;
+  };
+
   let stone: RingBuild["stone"] = null;
   let girdleY = 0;
+  let pavilionDepthMm = 0;
   let girdleOutline: Point2[] = [];
   let metricsStone: RingMetrics["stone"] = null;
 
@@ -609,9 +823,10 @@ export function buildRing(params: RingParams): RingBuild {
     const pavilionDepth = -profile[profile.length - 1].y * depthScale;
     const crownHeight = profile[0].y * depthScale;
 
-    // The culet rests just above the band, the way a cathedral setting sits.
-    const culetY = outerR + 0.15;
+    // The culet rests just above the shank — higher when the arches lift it.
+    const culetY = outerR + cathedralRise + 0.15;
     girdleY = culetY + pavilionDepth;
+    pavilionDepthMm = pavilionDepth;
 
     const unitOutline = sampleOutline(OUTLINES[shape], OUTLINE_SEGMENTS[shape]);
     stone = {
@@ -643,13 +858,37 @@ export function buildRing(params: RingParams): RingBuild {
   let prongTips: InstancedPart | null = null;
   let metricsProngs: RingMetrics["prongs"] = null;
 
-  if (shape && dims && params.prongCount > 0) {
+  if (shape && dims && params.settingType === "prong" && params.prongCount > 0) {
     const count = params.prongCount;
     const radius = Math.min(0.5, Math.max(0.18, dims.widthMm * 0.06));
     const beadRadius = radius * 1.15;
     // 4 prongs sit on the diagonals so they never cover the stone head-on;
     // 6 prongs start at the north tip, which is how elongated cuts are set.
     const startAngle = count === 4 ? Math.PI / 4 : Math.PI / 2;
+
+    // Sharp tips get a prong whether or not the even spacing lands on one: the
+    // nearest prong is pulled onto each tip, which is where a V-prong goes.
+    const angles = Array.from({ length: count }, (_, i) => startAngle + (i / count) * TAU);
+    const protectedTips = protectedAngles(shape);
+    const claimed = new Set<number>();
+    for (const tip of protectedTips) {
+      let bestIndex = -1;
+      let bestDelta = Infinity;
+      for (let i = 0; i < angles.length; i++) {
+        if (claimed.has(i)) continue;
+        const difference = angles[i] - tip;
+        const delta = Math.abs(Math.atan2(Math.sin(difference), Math.cos(difference)));
+        if (delta < bestDelta) {
+          bestDelta = delta;
+          bestIndex = i;
+        }
+      }
+      if (bestIndex >= 0) {
+        angles[bestIndex] = tip;
+        claimed.add(bestIndex);
+      }
+    }
+    const isProtected = (index: number) => claimed.has(index);
 
     const wires: Placement[] = [];
     const beads: Placement[] = [];
@@ -658,7 +897,7 @@ export function buildRing(params: RingParams): RingBuild {
     let footAxial = 0;
 
     for (let i = 0; i < count; i++) {
-      const angle = startAngle + (i / count) * TAU;
+      const angle = angles[i];
       const cos = Math.cos(angle);
       const sin = Math.sin(angle);
       const girdleR = radiusAtAngle(girdleOutline, angle);
@@ -672,8 +911,10 @@ export function buildRing(params: RingParams): RingBuild {
       const maxFootR = (halfWidth * 0.85) / Math.max(0.2, Math.abs(sin));
       const footR = Math.min(girdleR * 0.38, maxFootR);
       const footX = footR * cos;
-      // Seat the foot slightly below the band's outer surface.
-      const bandSurfaceY = Math.sqrt(Math.max(0.01, outerR * outerR - footX * footX));
+      // Seat the foot slightly below the band's outer surface — which the
+      // cathedral arch has raised, if there is one.
+      const shankR = archedRadiusAt(footX);
+      const bandSurfaceY = Math.sqrt(Math.max(0.01, shankR * shankR - footX * footX));
       const footY = bandSurfaceY - 0.15;
 
       const deltaR = tipR - footR;
@@ -696,10 +937,24 @@ export function buildRing(params: RingParams): RingBuild {
           (deltaR / length) * sin,
         ]),
       });
-      beads.push({
-        position: [tipR * cos, tipY, tipR * sin],
-        quaternion: [0, 0, 0, 1],
-      });
+      if (isProtected(i)) {
+        // V-prong: two claws pinching either side of the point, rather than one
+        // bead sitting on a tip it would slide off.
+        const spread = Math.min(0.5, (beadRadius * 1.15) / Math.max(0.4, girdleR));
+        for (const offset of [-spread, spread]) {
+          const bearing = angle + offset;
+          const flankR = radiusAtAngle(girdleOutline, bearing) + radius * 0.5;
+          beads.push({
+            position: [flankR * Math.cos(bearing), tipY, flankR * Math.sin(bearing)],
+            quaternion: [0, 0, 0, 1],
+          });
+        }
+      } else {
+        beads.push({
+          position: [tipR * cos, tipY, tipR * sin],
+          quaternion: [0, 0, 0, 1],
+        });
+      }
     }
 
     // Every wire is the same length within a build (the girdle radius only
@@ -724,11 +979,93 @@ export function buildRing(params: RingParams): RingBuild {
     };
   }
 
+  // --- Bezel ----------------------------------------------------------------
+  // A rim of metal encircling the girdle, holding the stone on its own. It
+  // replaces the prong head entirely rather than sitting alongside it.
+  let bezel: THREE.BufferGeometry | null = null;
+  let metricsBezel: RingMetrics["bezel"] = null;
+
+  if (shape && dims && params.settingType === "bezel") {
+    const wall = Math.min(0.9, Math.max(0.35, dims.widthMm * 0.09));
+    const grip = 0.04;
+    const inner = offsetOutline(girdleOutline, grip);
+    const outer = offsetOutline(girdleOutline, grip + wall);
+    const rise = Math.max(0.3, dims.depthMm * 0.1);
+    const drop = Math.max(0.6, pavilionDepthMm * 0.55);
+
+    bezel = buildRim(inner, outer, girdleY - drop, girdleY + rise);
+    metricsBezel = {
+      wallMm: wall,
+      risesAboveGirdleMm: rise,
+      sitsBelowGirdleMm: drop,
+      // Positive means the rim overlaps the crown and actually retains the stone.
+      girdleBiteMm: rise,
+    };
+  }
+
   // --- Halo ---------------------------------------------------------------
   let halo: InstancedPart | null = null;
   let metricsHalo: RingMetrics["halo"] = null;
 
-  if (shape && dims && params.halo) {
+  if (shape && dims && params.haloStyle === "hidden") {
+    // A hidden halo rings the base of the head, tucked inside the stone's
+    // silhouette so it reads from the side but not from directly above.
+    const profile = shape === "emerald" ? STEP_PROFILE : BRILLIANT_PROFILE;
+    const unitDepth = profile[0].y - profile[profile.length - 1].y;
+    const pavilionDepth = (-profile[profile.length - 1].y * dims.depthMm) / unitDepth;
+
+    const diameter = Math.min(1.6, Math.max(0.5, dims.widthMm * 0.13));
+    // 0.78 keeps the accents (plus their own radius) inside the girdle outline.
+    const ring = scalePolygon(girdleOutline, 0.78, 0.78);
+    const count = Math.min(
+      HALO_MAX_STONES,
+      Math.max(10, Math.round(perimeterOf(ring) / (diameter * 1.1))),
+    );
+    const placements = spaceAlongPolygon(ring, count);
+    const seatY = girdleY - pavilionDepth * 0.42;
+
+    let minSpacing = Infinity;
+    for (let i = 0; i < placements.length; i++) {
+      const a = placements[i];
+      const b = placements[(i + 1) % placements.length];
+      minSpacing = Math.min(minSpacing, Math.hypot(b.x - a.x, b.z - a.z));
+    }
+
+    let hiddenClearance = Infinity;
+    for (const placement of placements) {
+      const bearing = Math.atan2(placement.z, placement.x);
+      const girdleR = radiusAtAngle(girdleOutline, bearing);
+      hiddenClearance = Math.min(
+        hiddenClearance,
+        girdleR - (Math.hypot(placement.x, placement.z) + diameter / 2),
+      );
+    }
+
+    halo = {
+      geometry: buildAccentStone(diameter),
+      placements: placements.map((placement) => {
+        const length = Math.hypot(placement.x, placement.z) || 1;
+        return {
+          position: [placement.x, seatY, placement.z] as [number, number, number],
+          // Tables face outward, so the ring of stones catches light from the
+          // side profile rather than from the top.
+          quaternion: quaternionFromUpTo([
+            placement.x / length,
+            0,
+            placement.z / length,
+          ]),
+        };
+      }),
+    };
+    metricsHalo = {
+      count,
+      stoneDiameterMm: diameter,
+      minSpacingMm: minSpacing,
+      // For a hidden halo the meaningful clearance is how far inside the
+      // stone's silhouette it hides.
+      centreClearanceMm: hiddenClearance,
+    };
+  } else if (shape && dims && params.haloStyle === "standard") {
     const targetDiameter = Math.min(2.2, Math.max(0.7, dims.widthMm * 0.16));
     const gap = 0.12;
     const firstPass = offsetOutline(girdleOutline, targetDiameter / 2 + gap);
@@ -786,7 +1123,7 @@ export function buildRing(params: RingParams): RingBuild {
   let pave: InstancedPart | null = null;
   let metricsPave: RingMetrics["pave"] = null;
 
-  if (params.paveBand) {
+  if (params.paveCoverage !== "none") {
     // Never wider than the band it is set into, and never wider than it is deep.
     const diameter = Math.max(
       0.4,
@@ -800,20 +1137,36 @@ export function buildRing(params: RingParams): RingBuild {
     let skipHalfAngle = 0;
     if (shape && dims) {
       const headHalfWidth =
-        (params.halo && halo
+        (params.haloStyle === "standard" && halo
           ? Math.max(...halo.placements.map((p) => Math.abs(p.position[0]))) +
             (metricsHalo?.stoneDiameterMm ?? 0) / 2
           : dims.widthMm / 2) + 0.35;
       skipHalfAngle = Math.asin(Math.min(0.95, headHalfWidth / seatRadius)) + 0.05;
     }
 
-    const arcStart = THREE.MathUtils.degToRad(15);
-    const arcEnd = Math.PI - arcStart;
+    // Coverage arcs, measured with the top of the ring at 90°.
+    const COVERAGE_ARCS: Record<
+      Exclude<PaveCoverage, "none">,
+      { start: number; end: number }
+    > = {
+      half: { start: TAU / 24, end: Math.PI - TAU / 24 },
+      three_quarter: { start: -Math.PI / 4, end: Math.PI * 1.25 },
+      full: { start: 0, end: TAU },
+    };
+    const arc = COVERAGE_ARCS[params.paveCoverage];
+    // A full band wraps, so the last seat must not land on top of the first.
+    const wraps = params.paveCoverage === "full";
+    const span = arc.end - arc.start;
+    const intervals = Math.max(1, Math.round(span / angularStep));
+    const step = span / intervals;
+    const seats = wraps ? intervals : intervals + 1;
     const top = Math.PI / 2;
 
     const angles: number[] = [];
-    for (let angle = arcStart; angle <= arcEnd + 1e-6; angle += angularStep) {
-      if (skipHalfAngle > 0 && Math.abs(angle - top) < skipHalfAngle) continue;
+    for (let i = 0; i < seats; i++) {
+      const angle = arc.start + i * step;
+      const fromTop = Math.atan2(Math.sin(angle - top), Math.cos(angle - top));
+      if (skipHalfAngle > 0 && Math.abs(fromTop) < skipHalfAngle) continue;
       angles.push(angle);
     }
 
@@ -838,7 +1191,7 @@ export function buildRing(params: RingParams): RingBuild {
     }
   }
 
-  const parts = { band, stone, prongs, prongTips, halo, pave };
+  const parts = { band, stone, prongs, prongTips, bezel, halo, pave };
   const bounds = measureBounds(parts);
 
   return {
@@ -851,6 +1204,8 @@ export function buildRing(params: RingParams): RingBuild {
       prongs: metricsProngs,
       halo: metricsHalo,
       pave: metricsPave,
+      bezel: metricsBezel,
+      cathedralRiseMm: cathedralRise,
       boundsMm: {
         min: [bounds.min.x, bounds.min.y, bounds.min.z],
         max: [bounds.max.x, bounds.max.y, bounds.max.z],
@@ -888,6 +1243,7 @@ function measureBounds(build: Omit<RingBuild, "metrics">): THREE.Box3 {
   };
 
   add(build.band);
+  if (build.bezel) add(build.bezel);
   if (build.stone) {
     add(build.stone.geometry, [
       { position: build.stone.position, quaternion: [0, 0, 0, 1] },
@@ -905,6 +1261,7 @@ export function disposeRingBuild(build: RingBuild): void {
   build.stone?.geometry.dispose();
   build.prongs?.geometry.dispose();
   build.prongTips?.geometry.dispose();
+  build.bezel?.dispose();
   build.halo?.geometry.dispose();
   build.pave?.geometry.dispose();
 }

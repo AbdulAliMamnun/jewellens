@@ -104,12 +104,12 @@ check("ring size 1 → 3", belowMin.ringSize === 3);
 
 // --- changed-field diff ---------------------------------------------------
 console.log("\ndiffRingParams");
-const after = params({ metal: "rose_gold", stoneShape: "oval", halo: true });
+const after = params({ metal: "rose_gold", stoneShape: "oval", haloStyle: "standard" });
 const changed = diffRingParams(DEFAULT_RING_PARAMS, after);
 check(
   "reports exactly the changed fields",
   changed.length === 3 &&
-    ["metal", "stoneShape", "halo"].every((key) => changed.includes(key)),
+    ["metal", "stoneShape", "haloStyle"].every((key) => changed.includes(key)),
   changed.join(","),
 );
 check(

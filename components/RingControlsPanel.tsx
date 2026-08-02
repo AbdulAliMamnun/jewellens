@@ -5,8 +5,11 @@ import type { ReactNode } from "react";
 import { METAL_PRESETS } from "@/lib/metals";
 import {
   BAND_PROFILES,
+  HALO_STYLES,
+  PAVE_COVERAGES,
   PRONG_COUNTS,
   RING_PARAM_BOUNDS,
+  SETTING_TYPES,
   STONE_COLORS,
   STONE_SHAPES,
   type RingParams,
@@ -40,6 +43,7 @@ export default function RingControlsPanel({
   const isHighlighted = (field: keyof RingParams) =>
     highlighted?.includes(field) ?? false;
 
+  const noStone = params.stoneShape === "none";
   const stoneSize =
     params.stoneShape === "none"
       ? null
@@ -71,17 +75,79 @@ export default function RingControlsPanel({
       </div>
 
       <div className="flex-1 space-y-5 overflow-y-auto px-5 py-4">
-        <Section title="Band">
-          <Slider
-            label="Ring size"
-            value={params.ringSize}
-            bound={RING_PARAM_BOUNDS.ringSize}
-            format={(value) =>
-              `US ${value % 1 === 0 ? value : value.toFixed(2)} · ${innerDiameterMm(value).toFixed(2)}mm`
-            }
-            highlighted={isHighlighted("ringSize")}
-            onChange={(ringSize) => onChange({ ringSize })}
+        {/* Grouped the way the taxonomy groups a ring: what the eye goes to
+            first (the stone), then how it is held, then the band it sits on. */}
+        <Section title="Centre stone">
+          <Choices
+            label="Shape"
+            options={STONE_SHAPES}
+            value={params.stoneShape}
+            highlighted={isHighlighted("stoneShape")}
+            onChange={(stoneShape) => onChange({ stoneShape })}
           />
+          <Slider
+            label="Carat"
+            value={params.stoneCarat}
+            bound={RING_PARAM_BOUNDS.stoneCarat}
+            disabled={noStone}
+            format={(value) =>
+              stoneSize
+                ? `${value.toFixed(2)}ct · ${stoneSize.widthMm.toFixed(1)}×${stoneSize.lengthMm.toFixed(1)}mm`
+                : `${value.toFixed(2)}ct · ${roundDiameterMm(value).toFixed(1)}mm`
+            }
+            highlighted={isHighlighted("stoneCarat")}
+            onChange={(stoneCarat) => onChange({ stoneCarat })}
+          />
+          <Choices
+            label="Stone"
+            options={STONE_COLORS}
+            value={params.stoneColor}
+            disabled={noStone}
+            highlighted={isHighlighted("stoneColor")}
+            onChange={(stoneColor) => onChange({ stoneColor })}
+          />
+        </Section>
+
+        <Section title="Setting">
+          <Choices
+            label="Type"
+            options={SETTING_TYPES}
+            value={params.settingType}
+            disabled={noStone}
+            highlighted={isHighlighted("settingType")}
+            onChange={(settingType) => onChange({ settingType })}
+          />
+          {/* A bezel holds the stone on its own, so the prong count would be
+              dead UI — it is hidden rather than shown doing nothing. */}
+          {params.settingType === "prong" ? (
+            <Choices
+              label="Prongs"
+              options={PRONG_COUNTS}
+              value={params.prongCount}
+              disabled={noStone}
+              highlighted={isHighlighted("prongCount")}
+              onChange={(prongCount) => onChange({ prongCount })}
+            />
+          ) : null}
+          <Choices
+            label="Halo"
+            options={HALO_STYLES}
+            value={params.haloStyle}
+            disabled={noStone}
+            highlighted={isHighlighted("haloStyle")}
+            onChange={(haloStyle) => onChange({ haloStyle })}
+          />
+          <Toggle
+            label="Cathedral"
+            hint="Shoulders arch up to a raised head"
+            checked={params.cathedral}
+            disabled={noStone}
+            highlighted={isHighlighted("cathedral")}
+            onChange={(cathedral) => onChange({ cathedral })}
+          />
+        </Section>
+
+        <Section title="Band">
           <Slider
             label="Width"
             value={params.bandWidthMm}
@@ -105,12 +171,12 @@ export default function RingControlsPanel({
             highlighted={isHighlighted("bandProfile")}
             onChange={(bandProfile) => onChange({ bandProfile })}
           />
-          <Toggle
-            label="Pavé band"
-            hint="Accent stones along the top arc"
-            checked={params.paveBand}
-            highlighted={isHighlighted("paveBand")}
-            onChange={(paveBand) => onChange({ paveBand })}
+          <Choices
+            label="Pavé"
+            options={PAVE_COVERAGES}
+            value={params.paveCoverage}
+            highlighted={isHighlighted("paveCoverage")}
+            onChange={(paveCoverage) => onChange({ paveCoverage })}
           />
         </Section>
 
@@ -141,53 +207,16 @@ export default function RingControlsPanel({
           </div>
         </Section>
 
-        <Section title="Centre stone">
-          <Choices
-            label="Shape"
-            options={STONE_SHAPES}
-            value={params.stoneShape}
-            highlighted={isHighlighted("stoneShape")}
-            onChange={(stoneShape) => onChange({ stoneShape })}
-          />
+        <Section title="Size">
           <Slider
-            label="Carat"
-            value={params.stoneCarat}
-            bound={RING_PARAM_BOUNDS.stoneCarat}
-            disabled={params.stoneShape === "none"}
+            label="Ring size"
+            value={params.ringSize}
+            bound={RING_PARAM_BOUNDS.ringSize}
             format={(value) =>
-              stoneSize
-                ? `${value.toFixed(2)}ct · ${stoneSize.widthMm.toFixed(1)}×${stoneSize.lengthMm.toFixed(1)}mm`
-                : `${value.toFixed(2)}ct · ${roundDiameterMm(value).toFixed(1)}mm`
+              `US ${value % 1 === 0 ? value : value.toFixed(2)} · ${innerDiameterMm(value).toFixed(2)}mm inner`
             }
-            highlighted={isHighlighted("stoneCarat")}
-            onChange={(stoneCarat) => onChange({ stoneCarat })}
-          />
-          <Choices
-            label="Stone"
-            options={STONE_COLORS}
-            value={params.stoneColor}
-            disabled={params.stoneShape === "none"}
-            highlighted={isHighlighted("stoneColor")}
-            onChange={(stoneColor) => onChange({ stoneColor })}
-          />
-        </Section>
-
-        <Section title="Setting">
-          <Choices
-            label="Prongs"
-            options={PRONG_COUNTS}
-            value={params.prongCount}
-            disabled={params.stoneShape === "none"}
-            highlighted={isHighlighted("prongCount")}
-            onChange={(prongCount) => onChange({ prongCount })}
-          />
-          <Toggle
-            label="Halo"
-            hint="Ring of accent stones around the centre"
-            checked={params.halo}
-            disabled={params.stoneShape === "none"}
-            highlighted={isHighlighted("halo")}
-            onChange={(halo) => onChange({ halo })}
+            highlighted={isHighlighted("ringSize")}
+            onChange={(ringSize) => onChange({ ringSize })}
           />
         </Section>
       </div>

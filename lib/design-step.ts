@@ -1,25 +1,44 @@
 import { z } from "zod";
 
-import type { RingParams } from "@/lib/ring-params";
+// Relative + extension-bearing so the Node check scripts can import this module.
+import { migrateRingParams, type RingParams } from "./ring-params.ts";
 
 /**
  * Shape validation only — ranges are deliberately not enforced here. The model's
  * arithmetic is never trusted: everything goes through `clampRingParams` after
  * validation, so an out-of-range number is corrected rather than rejected.
+ *
+ * Wrapped in the v1 → v2 migration so a model that answers with the old boolean
+ * `halo`/`paveBand` fields still validates instead of burning the retry.
  */
-export const ringParamsSchema = z.object({
-  ringSize: z.number().finite(),
-  bandWidthMm: z.number().finite(),
-  bandThicknessMm: z.number().finite(),
-  bandProfile: z.enum(["flat", "rounded", "knife-edge"]),
-  metal: z.enum(["yellow_gold", "rose_gold", "white_gold", "platinum"]),
-  stoneShape: z.enum(["round", "oval", "cushion", "emerald", "pear", "none"]),
-  stoneCarat: z.number().finite(),
-  stoneColor: z.enum(["diamond", "sapphire", "ruby", "emerald"]),
-  prongCount: z.union([z.literal(0), z.literal(4), z.literal(6)]),
-  halo: z.boolean(),
-  paveBand: z.boolean(),
-}) satisfies z.ZodType<RingParams>;
+export const ringParamsSchema = z.preprocess(
+  migrateRingParams,
+  z.object({
+    ringSize: z.number().finite(),
+    bandWidthMm: z.number().finite(),
+    bandThicknessMm: z.number().finite(),
+    bandProfile: z.enum(["flat", "rounded", "knife-edge"]),
+    cathedral: z.boolean(),
+    metal: z.enum(["yellow_gold", "rose_gold", "white_gold", "platinum"]),
+    stoneShape: z.enum([
+      "round",
+      "oval",
+      "cushion",
+      "emerald",
+      "pear",
+      "princess",
+      "radiant",
+      "marquise",
+      "none",
+    ]),
+    stoneCarat: z.number().finite(),
+    stoneColor: z.enum(["diamond", "sapphire", "ruby", "emerald"]),
+    settingType: z.enum(["prong", "bezel"]),
+    prongCount: z.union([z.literal(0), z.literal(4), z.literal(6)]),
+    haloStyle: z.enum(["none", "standard", "hidden"]),
+    paveCoverage: z.enum(["none", "half", "three_quarter", "full"]),
+  }),
+) as unknown as z.ZodType<RingParams>;
 
 export const designStepResponseSchema = z.object({
   updatedParams: ringParamsSchema,

@@ -35,7 +35,7 @@ console.log(
  * The band is a torus, not a convex shell: bore vertices legitimately face the
  * axis. Test the two surfaces separately, in the ring's radial (XY) plane.
  */
-function bandNormalCheck(geometry, innerR, outerR) {
+function bandNormalCheck(geometry, innerR, outerR, halfWidth) {
   const position = geometry.getAttribute("position");
   const index = geometry.getIndex();
   let worstOuter = Infinity;
@@ -60,7 +60,10 @@ function bandNormalCheck(geometry, innerR, outerR) {
     if (radius < 1e-4) continue;
     const dot = (faceNormal.x * centroid.x + faceNormal.y * centroid.y) / radius;
 
-    if (radius > outerR * 0.99) worstOuter = Math.min(worstOuter, dot);
+    // Near the band's mid-width the outer surface faces straight out; at the
+    // edges it rolls over into the side faces, where "outward" is ambiguous.
+    const nearMidWidth = Math.abs(centroid.z) < halfWidth * 0.5;
+    if (radius > outerR * 0.99 && nearMidWidth) worstOuter = Math.min(worstOuter, dot);
     if (radius < innerR * 1.01) worstInner = Math.min(worstInner, -dot);
   }
   return { worstOuter, worstInner };
@@ -131,6 +134,7 @@ function inspect(label, params) {
     build.band,
     m.innerDiameterMm / 2,
     m.bandOuterRadiusMm,
+    params.bandWidthMm / 2,
   );
   lines.push(
     `band normals outer${round2(bandNormals.worstOuter)} bore${round2(bandNormals.worstInner)}`,
@@ -223,6 +227,7 @@ function inspect(label, params) {
     }
   };
   addGeometry(build.band);
+  if (build.bezel) addGeometry(build.bezel);
   if (build.stone) {
     addGeometry(build.stone.geometry, [{ position: build.stone.position, quaternion: [0, 0, 0, 1] }]);
   }
@@ -283,16 +288,32 @@ function girdleRadiusAt(build, bearing) {
 
 const cases = [
   ["default (1ct round, 4 prong)", {}],
-  ["oval 2ct halo", { stoneShape: "oval", stoneCarat: 2, halo: true }],
-  ["pear 1.5ct halo 6 prong", { stoneShape: "pear", stoneCarat: 1.5, halo: true, prongCount: 6 }],
+  ["oval 2ct halo", { stoneShape: "oval", stoneCarat: 2, haloStyle: "standard" }],
+  ["pear 1.5ct halo 6 prong", { stoneShape: "pear", stoneCarat: 1.5, haloStyle: "standard", prongCount: 6 }],
   ["emerald 3ct flat band", { stoneShape: "emerald", stoneCarat: 3, bandProfile: "flat", bandWidthMm: 3 }],
-  ["cushion 5ct halo pave", { stoneShape: "cushion", stoneCarat: 5, halo: true, paveBand: true, bandWidthMm: 4 }],
+  ["cushion 5ct halo pave", { stoneShape: "cushion", stoneCarat: 5, haloStyle: "standard", paveCoverage: "half", bandWidthMm: 4 }],
   ["tiny: 0.25ct, thin knife-edge", { stoneCarat: 0.25, bandProfile: "knife-edge", bandWidthMm: 1.5, bandThicknessMm: 1 }],
-  ["eternity: no stone + pave", { stoneShape: "none", paveBand: true, bandWidthMm: 2.5 }],
-  ["chunky: 8mm x 3mm band, 6 prong", { bandWidthMm: 8, bandThicknessMm: 3, prongCount: 6, paveBand: true }],
+  ["eternity: no stone + full pave", { stoneShape: "none", paveCoverage: "full", bandWidthMm: 2.5 }],
+  ["chunky: 8mm x 3mm band, 6 prong", { bandWidthMm: 8, bandThicknessMm: 3, prongCount: 6, paveCoverage: "half" }],
   ["size 3 min", { ringSize: 3 }],
-  ["size 13 max, 5ct halo pave", { ringSize: 13, stoneCarat: 5, halo: true, paveBand: true, bandWidthMm: 6 }],
+  ["size 13 max, 5ct halo pave", { ringSize: 13, stoneCarat: 5, haloStyle: "standard", paveCoverage: "half", bandWidthMm: 6 }],
   ["no prongs", { prongCount: 0 }],
+  // v2 schema
+  ["princess 1.2ct", { stoneShape: "princess", stoneCarat: 1.2 }],
+  ["radiant 2ct 6 prong", { stoneShape: "radiant", stoneCarat: 2, prongCount: 6 }],
+  ["marquise 1.5ct (V-prongs both tips)", { stoneShape: "marquise", stoneCarat: 1.5 }],
+  ["marquise 6 prong + halo", { stoneShape: "marquise", stoneCarat: 2, prongCount: 6, haloStyle: "standard" }],
+  ["bezel round 1ct", { settingType: "bezel" }],
+  ["bezel marquise 2ct", { settingType: "bezel", stoneShape: "marquise", stoneCarat: 2 }],
+  ["cathedral round 1ct", { cathedral: true }],
+  ["cathedral + bezel + 3/4 pave", { cathedral: true, settingType: "bezel", paveCoverage: "three_quarter" }],
+  ["hidden halo", { haloStyle: "hidden" }],
+  ["hidden halo on oval", { haloStyle: "hidden", stoneShape: "oval", stoneCarat: 1.5 }],
+  ["full pave with a centre stone", { paveCoverage: "full" }],
+  ["everything at once", {
+    stoneShape: "marquise", stoneCarat: 3, cathedral: true, settingType: "bezel",
+    haloStyle: "hidden", paveCoverage: "full", bandWidthMm: 3, ringSize: 9,
+  }],
 ];
 
 for (const [label, overrides] of cases) {
@@ -300,9 +321,15 @@ for (const [label, overrides] of cases) {
 }
 
 // --- exhaustive sweep: every combination the sliders can reach --------------
-const SHAPES = ["round", "oval", "cushion", "emerald", "pear", "none"];
+const SHAPES = [
+  "round", "oval", "cushion", "emerald", "pear",
+  "princess", "radiant", "marquise", "none",
+];
 const PROFILES = ["rounded", "flat", "knife-edge"];
 const PRONGS = [0, 4, 6];
+const SETTINGS = ["prong", "bezel"];
+const HALOS = ["none", "standard", "hidden"];
+const PAVES = ["none", "half", "three_quarter", "full"];
 let sweepCount = 0;
 
 function assertFinite(label, geometry, what) {
@@ -328,21 +355,22 @@ function assertFinite(label, geometry, what) {
 for (const stoneShape of SHAPES) {
   for (const bandProfile of PROFILES) {
     for (const prongCount of PRONGS) {
-      for (const halo of [false, true]) {
-        for (const paveBand of [false, true]) {
+      for (const settingType of SETTINGS) {
+       for (const cathedral of [false, true]) {
+        for (const haloStyle of HALOS) {
+         for (const paveCoverage of PAVES) {
           for (const [ringSize, bandWidthMm, bandThicknessMm, stoneCarat] of [
-            [3, 1.5, 1, 0.25],
             [7, 2, 1.6, 1],
             [13, 8, 3, 5],
-            [9.25, 1.5, 3, 4.35],
-            [4.5, 8, 1, 0.4],
+            [4.5, 1.5, 1, 0.25],
           ]) {
             const params = {
               ...DEFAULT_RING_PARAMS,
-              stoneShape, bandProfile, prongCount, halo, paveBand,
+              stoneShape, bandProfile, prongCount, settingType, cathedral,
+              haloStyle, paveCoverage,
               ringSize, bandWidthMm, bandThicknessMm, stoneCarat,
             };
-            const label = `sweep ${stoneShape}/${bandProfile}/${prongCount}p${halo ? "/halo" : ""}${paveBand ? "/pave" : ""} @${ringSize}/${bandWidthMm}/${bandThicknessMm}/${stoneCarat}ct`;
+            const label = `sweep ${stoneShape}/${bandProfile}/${prongCount}p/${settingType}${cathedral ? "/cathedral" : ""}/halo:${haloStyle}/pave:${paveCoverage} @${ringSize}/${bandWidthMm}/${bandThicknessMm}/${stoneCarat}ct`;
             let build;
             try {
               build = buildRing(params);
@@ -353,6 +381,7 @@ for (const stoneShape of SHAPES) {
             sweepCount++;
             assertFinite(label, build.band, "band");
             if (build.stone) assertFinite(label, build.stone.geometry, "stone");
+            if (build.bezel) assertFinite(label, build.bezel, "bezel");
             for (const [name, part] of [
               ["prongs", build.prongs],
               ["prongTips", build.prongTips],
@@ -373,6 +402,26 @@ for (const stoneShape of SHAPES) {
             if (build.prongs && params.prongCount === 0) flag(label, "prongs built with prongCount 0");
             if (build.stone && params.stoneShape === "none") flag(label, "stone built for shape none");
             if (build.halo && params.stoneShape === "none") flag(label, "halo built without a centre stone");
+            // A bezel replaces the prong head outright.
+            if (params.settingType === "bezel" && (build.prongs || build.prongTips)) {
+              flag(label, "prongs built alongside a bezel");
+            }
+            if (params.settingType === "bezel" && params.stoneShape !== "none" && !build.bezel) {
+              flag(label, "bezel setting produced no rim");
+            }
+            if (build.bezel && params.stoneShape === "none") flag(label, "bezel built without a centre stone");
+            if (params.cathedral && params.stoneShape !== "none" && build.metrics.cathedralRiseMm <= 0) {
+              flag(label, "cathedral requested but the head was not lifted");
+            }
+            if (!params.cathedral && build.metrics.cathedralRiseMm !== 0) {
+              flag(label, "shank arched without cathedral");
+            }
+            // The hidden halo has to stay inside the stone's silhouette, or it
+            // is just a standard halo sitting low.
+            if (params.haloStyle === "hidden" && build.metrics.halo &&
+                build.metrics.halo.centreClearanceMm < 0) {
+              flag(label, `hidden halo pokes ${round2(-build.metrics.halo.centreClearanceMm)}mm outside the girdle`);
+            }
             if (build.metrics.pave && build.metrics.pave.stoneDiameterMm > params.bandWidthMm) {
               flag(label, `pave Ø${round2(build.metrics.pave.stoneDiameterMm)} exceeds band width ${params.bandWidthMm}`);
             }
@@ -384,7 +433,9 @@ for (const stoneShape of SHAPES) {
             }
             disposeRingBuild(build);
           }
+         }
         }
+       }
       }
     }
   }

@@ -7,6 +7,7 @@ import {
   extractJsonObject,
 } from "@/lib/design-step";
 import { listClampAdjustments, reconcileNote } from "@/lib/design-note";
+import { DESIGN_STEP_SYSTEM_PROMPT } from "@/lib/design-prompt";
 import { clampRingParams, diffRingParams } from "@/lib/ring-params";
 
 /**
@@ -16,45 +17,6 @@ import { clampRingParams, diffRingParams } from "@/lib/ring-params";
  */
 const MODEL = "claude-sonnet-4-6";
 const MAX_TOKENS = 2048;
-
-const SYSTEM_PROMPT = `You are a jewelry design parameter mapper for a custom jewelry studio's 3D ring designer.
-
-Your ONLY job is to translate what the customer says into the RingParams schema below. Never invent fields, never add keys, never change parameters the customer did not ask about.
-
-SCHEMA — every response must contain all 11 fields:
-  ringSize        number   3-13 (US size, quarter sizes allowed)
-  bandWidthMm     number   1.5-8
-  bandThicknessMm number   1-3
-  bandProfile     "flat" | "rounded" | "knife-edge"
-  metal           "yellow_gold" | "rose_gold" | "white_gold" | "platinum"
-  stoneShape      "round" | "oval" | "cushion" | "emerald" | "pear" | "none"
-  stoneCarat      number   0.25-5
-  stoneColor      "diamond" | "sapphire" | "ruby" | "emerald"
-  prongCount      0 | 4 | 6
-  halo            boolean
-  paveBand        boolean
-
-JEWELRY VOCABULARY:
-- solitaire = a single centre stone: halo=false, paveBand=false
-- dainty / delicate / thin = thin band (bandWidthMm about 1.5-2, bandThicknessMm about 1-1.4)
-- chunky / bold / substantial = wide, thick band (bandWidthMm about 5-8, bandThicknessMm about 2.4-3)
-- hidden halo = halo true
-- eternity band = paveBand true and stoneShape "none"
-- "around X carats" / "about X" = set stoneCarat to X
-- relative requests ("thinner", "wider", "bigger stone") adjust the CURRENT value by one noticeable step (band width about 0.5mm, thickness about 0.3mm, carat about 0.25-0.5) — never jump straight to the extreme
-- classic / traditional = round stone, 6 prongs; modern = knife-edge or flat band
-
-RULES:
-1. Start from the current parameters in the message and change ONLY what the request implies.
-2. Anything the schema cannot express (filigree, milgrain, engraving, a specific designer, a price) goes in "unhandled" as a short phrase, and changes nothing.
-3. "changed" lists the field names you deliberately changed.
-4. Keep every number inside the ranges above.
-5. If a request is ambiguous, choose the most common interpretation for an engagement ring and state the assumption in assistantNote.
-6. assistantNote is ONE short sentence for the customer. No markdown, no lists, no restating the whole design.
-7. assistantNote must describe the values you actually wrote into updatedParams. If you could not honour a requested number, state the number you did use — never repeat the customer's figure back if updatedParams says something else.
-
-OUTPUT FORMAT — a single JSON object and nothing else. No markdown fences, no prose before or after:
-{"updatedParams":{"ringSize":7,"bandWidthMm":2,"bandThicknessMm":1.6,"bandProfile":"rounded","metal":"yellow_gold","stoneShape":"round","stoneCarat":1,"stoneColor":"diamond","prongCount":4,"halo":false,"paveBand":false},"changed":[],"assistantNote":"...","unhandled":[]}`;
 
 function buildUserTurn(
   currentParams: unknown,
@@ -120,7 +82,7 @@ export async function POST(request: Request) {
         model: MODEL,
         max_tokens: MAX_TOKENS,
         temperature: 0,
-        system: SYSTEM_PROMPT,
+        system: DESIGN_STEP_SYSTEM_PROMPT,
         messages,
       });
     } catch (cause) {
@@ -177,7 +139,7 @@ export async function POST(request: Request) {
         { role: "assistant", content: raw },
         {
           role: "user",
-          content: `That JSON did not match the schema (${lastProblem}). Reply with ONLY a corrected JSON object containing all 11 parameter fields.`,
+          content: `That JSON did not match the schema (${lastProblem}). Reply with ONLY a corrected JSON object containing all 13 parameter fields.`,
         },
       );
       continue;

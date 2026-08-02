@@ -31,11 +31,17 @@ export function describeRingParams(params: RingParams): string {
     metal,
     `size ${params.ringSize % 1 === 0 ? params.ringSize : params.ringSize.toFixed(2)}`,
   );
-  if (params.stoneShape !== "none" && params.prongCount > 0) {
-    parts.push(`${params.prongCount} prong`);
+  if (params.stoneShape !== "none") {
+    if (params.settingType === "bezel") parts.push("bezel");
+    else if (params.prongCount > 0) parts.push(`${params.prongCount} prong`);
   }
-  if (params.halo && params.stoneShape !== "none") parts.push("halo");
-  if (params.paveBand) parts.push("pavé");
+  if (params.cathedral) parts.push("cathedral");
+  if (params.haloStyle !== "none" && params.stoneShape !== "none") {
+    parts.push(params.haloStyle === "hidden" ? "hidden halo" : "halo");
+  }
+  if (params.paveCoverage !== "none") {
+    parts.push(params.paveCoverage === "full" ? "eternity pavé" : "pavé");
+  }
 
   return parts.join(" · ");
 }
@@ -70,10 +76,24 @@ function phraseFor(field: keyof RingParams, params: RingParams): string {
       return params.prongCount === 0
         ? "no prongs"
         : `${NUMBER_WORDS[params.prongCount] ?? params.prongCount} prongs`;
-    case "halo":
-      return params.halo ? "a halo" : "no halo";
-    case "paveBand":
-      return params.paveBand ? "a pavé band" : "no pavé";
+    case "cathedral":
+      return params.cathedral ? "a cathedral shank" : "a straight shank";
+    case "settingType":
+      return params.settingType === "bezel" ? "a bezel setting" : "a prong setting";
+    case "haloStyle":
+      return params.haloStyle === "none"
+        ? "no halo"
+        : params.haloStyle === "hidden"
+          ? "a hidden halo"
+          : "a halo";
+    case "paveCoverage":
+      return params.paveCoverage === "none"
+        ? "no pavé"
+        : params.paveCoverage === "full"
+          ? "pavé all the way around"
+          : params.paveCoverage === "three_quarter"
+            ? "three-quarter pavé"
+            : "a half pavé band";
   }
 }
 
