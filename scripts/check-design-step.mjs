@@ -13,6 +13,7 @@ import {
   clampRingParams,
   diffRingParams,
 } from "../lib/ring-params.ts";
+import { DESIGN_STEP_SYSTEM_PROMPT as PROMPT } from "../lib/design-prompt.ts";
 import {
   describeChangedFields,
   listClampAdjustments,
@@ -245,6 +246,179 @@ check(
   "no-op turn produces an honest note",
   describeChangedFields(applied, []).includes("Nothing changed"),
 );
+
+// --- v2 vocabulary --------------------------------------------------------
+// The model is not reachable from here, so these cover the two halves that are:
+// the pipeline's handling of a v2 reply, and the prompt that has to elicit it.
+console.log("\nv2 vocabulary");
+
+/** Runs a reply through the pipeline and also returns unhandled terms. */
+function runTurn(currentParams, overrides, note, unhandled = []) {
+  const raw = JSON.stringify({
+    updatedParams: params(overrides),
+    changed: Object.keys(overrides),
+    assistantNote: note,
+    unhandled,
+  });
+  const result = runPipeline(currentParams, raw);
+  const validated = designStepResponseSchema.safeParse(JSON.parse(raw));
+  return { ...result, unhandled: validated.success ? validated.data.unhandled : null };
+}
+
+// 1. marquise ---------------------------------------------------------------
+{
+  const turn = runTurn(
+    DEFAULT_RING_PARAMS,
+    { stoneShape: "marquise", stoneCarat: 1.5 },
+    "Switched to a 1.50ct marquise.",
+  );
+  check("marquise validates and applies", turn.applied.stoneShape === "marquise");
+  check("marquise reported as changed", turn.changed.includes("stoneShape"));
+  check("marquise note kept (no numeric conflict)", turn.rewritten === false);
+  check(
+    "generated note names the marquise cut",
+    describeChangedFields(turn.applied, ["stoneShape"]).includes("marquise"),
+    describeChangedFields(turn.applied, ["stoneShape"]),
+  );
+  check(
+    "an invented cut falls back rather than applying",
+    clampRingParams(params({ stoneShape: "asscher" })).stoneShape === "round",
+  );
+  check("prompt lists marquise as selectable", /"marquise"/.test(PROMPT));
+}
+
+// 2. bezel via chat ---------------------------------------------------------
+{
+  const turn = runTurn(
+    DEFAULT_RING_PARAMS,
+    { settingType: "bezel" },
+    "Switched to a bezel setting.",
+  );
+  check("bezel validates and applies", turn.applied.settingType === "bezel");
+  check("bezel is the only reported change", turn.changed.join(",") === "settingType");
+  check(
+    "generated note names the bezel setting",
+    describeChangedFields(turn.applied, ["settingType"]).includes("bezel"),
+  );
+  check(
+    "prong count is left alone in the params, not zeroed",
+    turn.applied.prongCount === DEFAULT_RING_PARAMS.prongCount,
+    String(turn.applied.prongCount),
+  );
+  check(
+    "prompt maps bezel wording onto settingType",
+    /bezel-set|rubover/i.test(PROMPT) && /settingType "bezel"/.test(PROMPT),
+  );
+}
+
+// 3. hidden halo vs standard halo -------------------------------------------
+{
+  const hidden = runTurn(
+    DEFAULT_RING_PARAMS,
+    { haloStyle: "hidden" },
+    "Added a hidden halo under the head.",
+  );
+  const standard = runTurn(
+    DEFAULT_RING_PARAMS,
+    { haloStyle: "standard" },
+    "Added a halo around the centre stone.",
+  );
+  check("hidden halo applies", hidden.applied.haloStyle === "hidden");
+  check("standard halo applies", standard.applied.haloStyle === "standard");
+  check(
+    "the two styles are described differently",
+    describeChangedFields(hidden.applied, ["haloStyle"]) !==
+      describeChangedFields(standard.applied, ["haloStyle"]),
+  );
+  check(
+    "hidden is described as hidden",
+    describeChangedFields(hidden.applied, ["haloStyle"]).includes("hidden halo"),
+  );
+  check(
+    "the v1 boolean migrates to standard, never hidden",
+    clampRingParams({ ...DEFAULT_RING_PARAMS, halo: true, haloStyle: undefined })
+      .haloStyle === "standard",
+  );
+  check(
+    "prompt distinguishes hidden from unqualified halo",
+    /hidden halo.*haloStyle "hidden"/is.test(PROMPT) &&
+      /halo \(unqualified\) = haloStyle "standard"/.test(PROMPT),
+  );
+}
+
+// 4. full pavé / eternity ---------------------------------------------------
+{
+  const turn = runTurn(
+    DEFAULT_RING_PARAMS,
+    { paveCoverage: "full", stoneShape: "none" },
+    "Made it an eternity band with stones all the way around.",
+  );
+  check("full pavé applies", turn.applied.paveCoverage === "full");
+  check("eternity drops the centre stone", turn.applied.stoneShape === "none");
+  check(
+    "generated note says all the way around",
+    describeChangedFields(turn.applied, ["paveCoverage"]).includes("all the way around"),
+  );
+  check(
+    "the v1 boolean migrates to half, not full",
+    clampRingParams({ ...DEFAULT_RING_PARAMS, paveBand: true, paveCoverage: undefined })
+      .paveCoverage === "half",
+  );
+  check(
+    "prompt maps eternity phrasing onto full coverage",
+    /eternity.*paveCoverage "full"/is.test(PROMPT),
+  );
+}
+
+// 5. an unsupported term comes back defined ---------------------------------
+{
+  const note =
+    "Milgrain (a fine beaded edge detail) isn't in the live designer yet; it's added at the template stage.";
+  const turn = runTurn(DEFAULT_RING_PARAMS, {}, note, ["milgrain"]);
+  check("nothing changed for an unsupported request", turn.changed.length === 0);
+  check("the term survives to the UI", turn.unhandled.join(",") === "milgrain");
+  check("the definition note is not rewritten", turn.rewritten === false);
+  check("the note reaches the UI intact", turn.note === note);
+  check(
+    "prompt requires a definition alongside the unhandled term",
+    /assistantNote must define that term/i.test(PROMPT) &&
+      /Never respond as though you did not understand the word/i.test(PROMPT),
+  );
+  check(
+    "prompt carries the long-tail vocabulary",
+    ["milgrain", "filigree", "channel-set", "bar-set", "tension", "flush", "gypsy",
+     "split shank", "twisted", "tapered", "east-west", "three-stone", "double halo",
+     "two-tone", "toi-et-moi", "comfort fit", "satin", "hammered", "brushed",
+     "asscher", "heart", "trillion"].every((term) =>
+      PROMPT.toLowerCase().includes(term.toLowerCase()),
+    ),
+  );
+}
+
+// 6. mixed supported + unsupported ------------------------------------------
+{
+  const note =
+    "Switched to rose gold with a marquise centre. Filigree (openwork wire scrollwork) isn't in the live designer yet.";
+  const turn = runTurn(
+    DEFAULT_RING_PARAMS,
+    { metal: "rose_gold", stoneShape: "marquise" },
+    note,
+    ["filigree"],
+  );
+  check("the supported half is applied", turn.applied.metal === "rose_gold");
+  check("both supported fields are applied", turn.applied.stoneShape === "marquise");
+  check(
+    "both are reported as changed",
+    turn.changed.includes("metal") && turn.changed.includes("stoneShape"),
+    turn.changed.join(","),
+  );
+  check("the unsupported half is not dropped", turn.unhandled.join(",") === "filigree");
+  check("the mixed note survives intact", turn.note === note && turn.rewritten === false);
+  check(
+    "prompt tells the model to apply the nearest match and say so",
+    /apply that match AND say plainly in the note what you substituted/i.test(PROMPT),
+  );
+}
 
 console.log(
   failures === 0 ? "\nAll design-step checks passed." : `\n${failures} check(s) FAILED.`,
