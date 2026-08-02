@@ -1,17 +1,14 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
+import DesignChat from "@/components/DesignChat";
 import ParametricRing from "@/components/ParametricRing";
 import RingControlsPanel from "@/components/RingControlsPanel";
 import ViewerShell, { ChromeButton } from "@/components/ViewerShell";
+import { useDesignStore } from "@/lib/design-store";
 import { getMetalPreset } from "@/lib/metals";
-import {
-  DEFAULT_RING_PARAMS,
-  STONE_SHAPES,
-  clampRingParams,
-  type RingParams,
-} from "@/lib/ring-params";
+import { STONE_SHAPES, type RingParams } from "@/lib/ring-params";
 
 /**
  * Looking down at ~58° — elongated cuts read as elongated from here, which they
@@ -19,6 +16,9 @@ import {
  */
 const DESIGNER_CAMERA: [number, number, number] = [0, 3.05, 1.9];
 const DESIGNER_TARGET: [number, number, number] = [0, 0.15, 0];
+
+/** How long changed controls stay lit after a conversational turn. */
+const HIGHLIGHT_MS = 2600;
 
 export interface DesignerViewerProps {
   className?: string;
@@ -35,7 +35,10 @@ function describe(params: RingParams): string {
       ? ["Plain band"]
       : [`${params.stoneCarat.toFixed(2)}ct ${shape.toLowerCase()}`];
 
-  parts.push(metal, `size ${params.ringSize % 1 === 0 ? params.ringSize : params.ringSize.toFixed(2)}`);
+  parts.push(
+    metal,
+    `size ${params.ringSize % 1 === 0 ? params.ringSize : params.ringSize.toFixed(2)}`,
+  );
   if (params.stoneShape !== "none" && params.prongCount > 0) {
     parts.push(`${params.prongCount} prong`);
   }
@@ -46,18 +49,27 @@ function describe(params: RingParams): string {
 }
 
 /**
- * D1: the parametric ring in the shared viewer chrome, driven by manual
- * controls. D2 lifts `params` into the conversational store; the controls panel
- * already accepts a `highlighted` list for showing what a chat turn changed.
+ * The parametric ring in the shared viewer chrome. Manual controls and the chat
+ * are two faces of one Zustand store, so either can drive the design and both
+ * always agree.
  */
 export default function DesignerViewer({ className }: DesignerViewerProps) {
-  const [params, setParams] = useState<RingParams>(DEFAULT_RING_PARAMS);
+  const params = useDesignStore((state) => state.params);
+  const changed = useDesignStore((state) => state.changed);
+  const error = useDesignStore((state) => state.error);
+  const updateParams = useDesignStore((state) => state.updateParams);
+  const resetParams = useDesignStore((state) => state.resetParams);
+  const clearChanged = useDesignStore((state) => state.clearChanged);
+  const dismissError = useDesignStore((state) => state.dismissError);
+
   const [panelOpen, setPanelOpen] = useState(true);
 
-  function update(patch: Partial<RingParams>) {
-    // Clamp on every update — the same guard D2 applies to model output.
-    setParams((current) => clampRingParams({ ...current, ...patch }));
-  }
+  // The glow is a brief signal, not a mode — let it fade on its own.
+  useEffect(() => {
+    if (changed.length === 0) return;
+    const timer = window.setTimeout(clearChanged, HIGHLIGHT_MS);
+    return () => window.clearTimeout(timer);
+  }, [changed, clearChanged]);
 
   return (
     <ViewerShell
@@ -79,18 +91,49 @@ export default function DesignerViewer({ className }: DesignerViewerProps) {
         </ChromeButton>
       }
       footer={
-        <span className="pointer-events-auto rounded-full bg-white/70 px-3.5 py-1.5 text-sm font-medium text-zinc-600 shadow-sm backdrop-blur">
-          {describe(params)}
-        </span>
+        <div
+          className={[
+            "w-full transition-[padding] duration-200",
+            panelOpen ? "pr-[22rem]" : "",
+          ].join(" ")}
+        >
+          <div className="mx-auto w-full max-w-2xl">
+            <DesignChat />
+          </div>
+        </div>
       }
       overlay={
-        <RingControlsPanel
-          params={params}
-          onChange={update}
-          onReset={() => setParams(DEFAULT_RING_PARAMS)}
-          open={panelOpen}
-          onClose={() => setPanelOpen(false)}
-        />
+        <>
+          <RingControlsPanel
+            params={params}
+            onChange={updateParams}
+            onReset={resetParams}
+            open={panelOpen}
+            onClose={() => setPanelOpen(false)}
+            highlighted={changed}
+          />
+
+          {error ? (
+            <div className="pointer-events-none absolute inset-x-0 top-16 flex justify-center px-4">
+              <div className="pointer-events-auto flex max-w-md items-start gap-3 rounded-xl border border-red-200 bg-white/95 px-4 py-3 shadow-lg">
+                <div className="min-w-0">
+                  <p className="text-sm font-semibold text-red-700">
+                    Design step failed
+                  </p>
+                  <p className="mt-0.5 text-sm text-zinc-600">{error}</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={dismissError}
+                  aria-label="Dismiss error"
+                  className="ml-auto shrink-0 rounded-full px-2 py-0.5 text-zinc-400 transition hover:bg-zinc-100 hover:text-zinc-700"
+                >
+                  ✕
+                </button>
+              </div>
+            </div>
+          ) : null}
+        </>
       }
     />
   );

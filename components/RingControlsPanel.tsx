@@ -195,8 +195,11 @@ export default function RingControlsPanel({
   );
 }
 
+/** Brief glow marking a control the last conversational turn changed. */
 function flashClass(highlighted: boolean): string {
-  return highlighted ? "rounded-lg ring-2 ring-amber-300/80" : "";
+  return highlighted
+    ? "rounded-lg bg-amber-100/70 ring-2 ring-amber-400/80 transition-colors"
+    : "rounded-lg transition-colors";
 }
 
 function Section({ title, children }: { title: string; children: ReactNode }) {

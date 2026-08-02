@@ -80,6 +80,32 @@ export const DEFAULT_RING_PARAMS: RingParams = {
   paveBand: false,
 };
 
+export const RING_PARAM_KEYS = [
+  "ringSize",
+  "bandWidthMm",
+  "bandThicknessMm",
+  "bandProfile",
+  "metal",
+  "stoneShape",
+  "stoneCarat",
+  "stoneColor",
+  "prongCount",
+  "halo",
+  "paveBand",
+] as const satisfies readonly (keyof RingParams)[];
+
+export function isRingParamKey(value: string): value is keyof RingParams {
+  return (RING_PARAM_KEYS as readonly string[]).includes(value);
+}
+
+/** Which fields actually differ — ground truth for highlighting what a turn changed. */
+export function diffRingParams(
+  before: RingParams,
+  after: RingParams,
+): (keyof RingParams)[] {
+  return RING_PARAM_KEYS.filter((key) => before[key] !== after[key]);
+}
+
 function clampNumber(value: number, bound: NumericBound, fallback: number): number {
   if (!Number.isFinite(value)) return fallback;
   return Math.min(bound.max, Math.max(bound.min, value));

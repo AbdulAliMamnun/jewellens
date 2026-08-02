@@ -1,5 +1,17 @@
 This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
 
+## Setup
+
+The conversational designer calls the Anthropic API from a server route. Create
+`.env.local` (gitignored) before running it:
+
+```bash
+echo "ANTHROPIC_API_KEY=sk-ant-..." > .env.local
+```
+
+Without the key the app still runs — the 3D viewer, the parametric ring, and all
+manual controls work; only the chat returns an error toast.
+
 ## Getting Started
 
 First, run the development server:
