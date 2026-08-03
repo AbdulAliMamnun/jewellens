@@ -33,6 +33,14 @@ import {
   profileRequestSchema,
 } from "../lib/catalog-schema.ts";
 import { resolveLink, fileNameFromLink, resolutionBadge } from "../lib/file-resolution.ts";
+import {
+  bestMatch,
+  filterColumns,
+  matchRows,
+  rangeInUse,
+  relaxationNote,
+  valuesInUse,
+} from "../lib/catalog-filter.ts";
 import { PROFILE_SCHEMA_SYSTEM_PROMPT } from "../lib/profile-prompt.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -328,6 +336,159 @@ check(
     { kind: "session", name: broken.fileName, entryId: "entry-8" },
   ]).status === "resolved",
 );
+
+// --- filtering + the nearest-match path -----------------------------------
+console.log("\nmatchRows");
+{
+  // The fixture as the dashboard sees it, using the groupings above.
+  const settingColumn = {
+    name: "Setting",
+    role: "categorical_filter",
+    canonical_label: "setting",
+    values: [
+      { canonical: "4 prong", variants: ["4 prong"] },
+      { canonical: "6 prong", variants: ["6 prong"] },
+      { canonical: "bezel", variants: ["Bezel"] },
+      { canonical: "channel", variants: ["Channel"] },
+      { canonical: "v-prong", variants: ["V-prong"] },
+    ],
+    range: null,
+  };
+  const fixtureShapes = {
+    name: "Stone Shape",
+    role: "categorical_filter",
+    canonical_label: "stone_shape",
+    values: [
+      { canonical: "oval", variants: ["Oval"] },
+      { canonical: "round", variants: ["Round"] },
+      { canonical: "cushon", variants: ["Cushon"] },
+      { canonical: "emerald", variants: ["Emerald"] },
+      { canonical: "pear", variants: ["Pear"] },
+    ],
+    range: null,
+  };
+
+  const rows = catalog.rows.map((raw, index) => ({
+    index,
+    identifier: raw["Design ID"],
+    canonical: {
+      Metal: canonicalFor(metalColumn, raw["Metal"]),
+      "Stone Shape": canonicalFor(fixtureShapes, raw["Stone Shape"]),
+      Setting: canonicalFor(settingColumn, raw["Setting"]),
+    },
+    numeric: { Carat: parseNumeric(raw["Carat"]) },
+    link: resolveLink(raw["File Link"], pool),
+  }));
+
+  const filters = (categorical = {}, numeric = {}) => ({ categorical, numeric });
+
+  const rose = matchRows(rows, filters({ Metal: ["rose gold"] }));
+  check(
+    "one chip narrows to its rows",
+    rose.exact && rose.rows.length === 4,
+    `${rose.rows.length} rows`,
+  );
+  check(
+    "values within a column are OR'd",
+    matchRows(rows, filters({ Metal: ["yellow gold", "platinum"] })).rows.length === 2,
+  );
+  check(
+    "columns are AND'd",
+    matchRows(rows, filters({ Metal: ["rose gold"], "Stone Shape": ["oval"] })).rows
+      .length === 1,
+  );
+  check(
+    "a range filters on the parsed number, not the text",
+    matchRows(rows, filters({}, { Carat: { min: 1.4, max: 2.1 } })).rows.length === 3,
+    JSON.stringify(
+      matchRows(rows, filters({}, { Carat: { min: 1.4, max: 2.1 } })).rows.map(
+        (row) => row.identifier,
+      ),
+    ),
+  );
+  check(
+    "a blank cell does not match a filter on that column",
+    !matchRows(rows, filters({ Setting: ["bezel"] })).rows.some(
+      (row) => row.identifier === "JL-1003",
+    ),
+  );
+  check(
+    "no filters means the whole catalog",
+    matchRows(rows, filters()).rows.length === rows.length,
+  );
+
+  // No exact match: platinum exists, but not in an oval.
+  const relaxed = matchRows(rows, filters({ Metal: ["platinum"], "Stone Shape": ["oval"] }));
+  check("an impossible combination is not exact", !relaxed.exact);
+  check("…but still returns designs", relaxed.rows.length > 0);
+  check(
+    "…and names exactly one filter as relaxed",
+    relaxed.relaxed.length === 1,
+    JSON.stringify(relaxed.relaxed),
+  );
+  check(
+    "…choosing the relaxation that gives up the least",
+    relaxed.rows.length ===
+      Math.min(
+        matchRows(rows, filters({ Metal: ["platinum"] })).rows.length,
+        matchRows(rows, filters({ "Stone Shape": ["oval"] })).rows.length,
+      ),
+  );
+  check(
+    "the relaxation is explained in words",
+    /Nothing matched exactly.*relaxed\./s.test(
+      relaxationNote(relaxed, (column) => column.toLowerCase()),
+    ),
+    String(relaxationNote(relaxed, (column) => column.toLowerCase())),
+  );
+  check(
+    "an exact match is explained as nothing at all",
+    relaxationNote(rose, (column) => column) === null,
+  );
+
+  // Two impossible filters at once still lands somewhere.
+  const deep = matchRows(
+    rows,
+    filters({ Metal: ["platinum"], "Stone Shape": ["oval"] }, { Carat: { min: 5, max: 6 } }),
+  );
+  check("a doubly impossible request still returns designs", deep.rows.length > 0);
+  check(
+    "…and reports every filter it gave up",
+    deep.relaxed.length >= 2,
+    JSON.stringify(deep.relaxed),
+  );
+
+  // What actually gets loaded into the viewer.
+  check(
+    "the best match is one whose file exists",
+    bestMatch(rows).link.status === "resolved",
+  );
+  const onlyBroken = rows.filter((row) => row.link.status === "missing");
+  check(
+    "a results list of only-missing files still yields a selection",
+    bestMatch(onlyBroken)?.identifier === "JL-1006",
+  );
+  check("an empty result set selects nothing", bestMatch([]) === null);
+
+  // Panel generation.
+  const schema = { columns: [metalColumn, fixtureShapes, settingColumn], file_link_column: "File Link", notes: "" };
+  check(
+    "the panel is generated from the schema, not hard-coded",
+    filterColumns(schema).map((column) => column.name).join(",") ===
+      "Metal,Stone Shape,Setting",
+  );
+  check(
+    "chips only offer values the sheet actually uses",
+    valuesInUse(metalColumn, rows).join(",") === "rose gold,yellow gold,platinum",
+    valuesInUse(metalColumn, rows).join(","),
+  );
+  check(
+    "the slider spans the sheet's real numbers",
+    JSON.stringify(rangeInUse({ ...metalColumn, name: "Carat" }, rows)) ===
+      JSON.stringify({ min: 0, max: 2.05 }),
+    JSON.stringify(rangeInUse({ ...metalColumn, name: "Carat" }, rows)),
+  );
+}
 
 // --- the prompt's promises ------------------------------------------------
 console.log("\nPROFILE_SCHEMA_SYSTEM_PROMPT");

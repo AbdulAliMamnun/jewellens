@@ -1,100 +1,152 @@
 "use client";
 
-import CatalogUpload from "@/components/CatalogUpload";
-import SchemaConfirmation from "@/components/SchemaConfirmation";
-import ViewerWorkbench from "@/components/ViewerWorkbench";
-import { useCatalogStore } from "@/lib/catalog-store";
+import { useRef, useState } from "react";
 
-/** One row per committed column, so the studio can see what the app is filtering on. */
-function CommittedSummary() {
-  const schema = useCatalogStore((state) => state.schema);
-  const rows = useCatalogStore((state) => state.rows);
+import ArchiveSidebar from "@/components/ArchiveSidebar";
+import ArchiveViewer from "@/components/ArchiveViewer";
+import CatalogUpload from "@/components/CatalogUpload";
+import DesignerViewer from "@/components/DesignerViewer";
+import FilterPanel from "@/components/FilterPanel";
+import ResultsStrip from "@/components/ResultsStrip";
+import SchemaConfirmation from "@/components/SchemaConfirmation";
+import { useArchiveStore } from "@/lib/archive-store";
+import { useCatalogStore } from "@/lib/catalog-store";
+import { SUPPORTED_EXTENSIONS } from "@/lib/model-loader";
+
+/** One line about the loaded catalog, with the way back to the column editor. */
+function CatalogBar({ onDesign }: { onDesign: () => void }) {
   const parsed = useCatalogStore((state) => state.parsed);
+  const rows = useCatalogStore((state) => state.rows);
   const reopen = useCatalogStore((state) => state.reopen);
   const reset = useCatalogStore((state) => state.reset);
+  const addFiles = useArchiveStore((state) => state.addFiles);
 
-  if (!schema || !parsed) return null;
+  const filesInputRef = useRef<HTMLInputElement>(null);
+  const folderInputRef = useRef<HTMLInputElement>(null);
 
-  const filters = schema.columns.filter((column) => column.role === "categorical_filter");
-  const ranges = schema.columns.filter((column) => column.role === "numeric_range");
   const missing = rows.filter((row) => row.link.status === "missing").length;
 
   return (
-    <div className="rounded-2xl border border-zinc-200 bg-white px-4 py-3">
-      <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-        <h2 className="text-sm font-semibold tracking-tight text-zinc-900">
-          {parsed.fileName}
-        </h2>
-        <p className="text-xs text-zinc-500">
-          {rows.length.toLocaleString()} designs · {filters.length} filter
-          {filters.length === 1 ? "" : "s"} · {ranges.length} range
-          {ranges.length === 1 ? "" : "s"}
-          {missing > 0 ? ` · ${missing} file${missing > 1 ? "s" : ""} not found` : ""}
-        </p>
-        <div className="ml-auto flex gap-2">
-          <button
-            type="button"
-            onClick={reopen}
-            className="rounded-full border border-zinc-300 px-3 py-1 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100"
-          >
-            Edit columns
-          </button>
-          <button
-            type="button"
-            onClick={reset}
-            className="rounded-full px-3 py-1 text-xs font-medium text-zinc-500 transition hover:bg-zinc-100 hover:text-zinc-800"
-          >
-            Load another
-          </button>
-        </div>
-      </div>
-
-      <div className="mt-2 flex flex-wrap gap-1.5">
-        {filters.map((column) => (
-          <span
-            key={column.name}
-            className="rounded-full bg-zinc-100 px-2.5 py-0.5 text-xs text-zinc-700"
-          >
-            {column.canonical_label}
-            <span className="ml-1 text-zinc-400">{column.values.length}</span>
-          </span>
-        ))}
-        {ranges.map((column) => (
-          <span
-            key={column.name}
-            className="rounded-full bg-zinc-100 px-2.5 py-0.5 text-xs text-zinc-700"
-          >
-            {column.canonical_label}
-            <span className="ml-1 text-zinc-400">range</span>
-          </span>
-        ))}
-      </div>
-
-      {/* Step 2 replaces this line with the generated dashboard. */}
-      <p className="mt-2 text-xs text-zinc-400">
-        Filters and results appear here next.
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+      <h2 className="text-sm font-semibold tracking-tight text-zinc-900">
+        {parsed?.fileName}
+      </h2>
+      <p className="text-xs text-zinc-500">
+        {rows.length.toLocaleString()} designs
+        {missing > 0 ? ` · ${missing} file${missing > 1 ? "s" : ""} not found` : ""}
       </p>
+      <button
+        type="button"
+        onClick={reopen}
+        className="rounded-full border border-zinc-300 bg-white px-3 py-1 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100"
+      >
+        Edit columns
+      </button>
+      <button
+        type="button"
+        onClick={reset}
+        className="rounded-full px-3 py-1 text-xs font-medium text-zinc-500 transition hover:bg-zinc-100 hover:text-zinc-800"
+      >
+        Load another catalog
+      </button>
+
+      {/* Dropping a file mid-meeting is still first-class here: it joins the pool
+          the catalog resolves against, so a row that was missing lights up. */}
+      <button
+        type="button"
+        onClick={() => filesInputRef.current?.click()}
+        className="rounded-full border border-zinc-300 bg-white px-3 py-1 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100"
+      >
+        Add files
+      </button>
+      <button
+        type="button"
+        onClick={() => folderInputRef.current?.click()}
+        className="rounded-full border border-zinc-300 bg-white px-3 py-1 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100"
+      >
+        Add folder
+      </button>
+
+      <button
+        type="button"
+        onClick={onDesign}
+        className="ml-auto rounded-full bg-zinc-900 px-4 py-1.5 text-sm font-medium text-white transition hover:bg-zinc-700"
+      >
+        Design something new
+      </button>
+
+      <input
+        ref={filesInputRef}
+        type="file"
+        multiple
+        accept={SUPPORTED_EXTENSIONS.join(",")}
+        className="hidden"
+        onChange={(event) => {
+          void addFiles(Array.from(event.target.files ?? []));
+          event.target.value = "";
+        }}
+      />
+      {/* webkitdirectory is the only way to pick a whole folder from a dialog. */}
+      <input
+        ref={folderInputRef}
+        type="file"
+        multiple
+        // @ts-expect-error — non-standard but supported in every target browser
+        webkitdirectory=""
+        className="hidden"
+        onChange={(event) => {
+          void addFiles(Array.from(event.target.files ?? []));
+          event.target.value = "";
+        }}
+      />
     </div>
   );
 }
 
 /**
- * The app's primary screen. A studio starts by loading its catalog; the viewer
- * and the archive tools live inside this screen rather than beside it.
+ * The app's primary screen. A studio starts by loading its catalog; filtering,
+ * the viewer and the archive tools all live inside this one screen rather than
+ * beside it.
  */
 export default function CatalogWorkspace() {
   const stage = useCatalogStore((state) => state.stage);
+  const [designing, setDesigning] = useState(false);
 
   if (stage === "confirming") return <SchemaConfirmation />;
+  if (stage !== "committed") return <CatalogUpload />;
 
-  if (stage === "committed") {
+  if (designing) {
     return (
       <div className="flex flex-col gap-4">
-        <CommittedSummary />
-        <ViewerWorkbench />
+        <div className="flex items-center gap-3">
+          <button
+            type="button"
+            onClick={() => setDesigning(false)}
+            className="rounded-full border border-zinc-300 bg-white px-3 py-1 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100"
+          >
+            ← Back to the catalog
+          </button>
+        </div>
+        <DesignerViewer />
       </div>
     );
   }
 
-  return <CatalogUpload />;
+  return (
+    <div className="flex flex-col gap-4">
+      <CatalogBar onDesign={() => setDesigning(true)} />
+
+      <div className="flex min-w-0 gap-4">
+        <div className="flex w-64 shrink-0 flex-col gap-4">
+          <FilterPanel />
+          <ArchiveSidebar />
+        </div>
+
+        <div className="flex min-w-0 flex-1 flex-col gap-3">
+          <ResultsStrip />
+          <ArchiveViewer />
+        </div>
+      </div>
+    </div>
+  );
 }

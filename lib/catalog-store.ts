@@ -17,6 +17,13 @@ import {
   type SchemaProfile,
 } from "@/lib/catalog-schema";
 import {
+  EMPTY_FILTERS,
+  bestMatch,
+  matchRows,
+  type FilterState,
+  type MatchResult,
+} from "@/lib/catalog-filter";
+import {
   resolveLink,
   type LinkResolution,
   type ResolvableFile,
@@ -49,6 +56,13 @@ interface CatalogStore {
   error: string | null;
   busy: boolean;
 
+  /** Filter state — the widgets and the chat both drive exactly this. */
+  filters: FilterState;
+  /** Rows on screen, plus what (if anything) had to be given up to find them. */
+  results: MatchResult<CatalogRow>;
+  /** The row the viewer is showing. */
+  selectedIndex: number | null;
+
   loadFile: (file: File) => Promise<void>;
   loadFromUrl: (url: string, label: string) => Promise<void>;
   profile: () => Promise<void>;
@@ -62,6 +76,26 @@ interface CatalogStore {
   reset: () => void;
   setPool: (pool: ResolvableFile[]) => void;
   refreshArchivePool: () => Promise<void>;
+
+  toggleValue: (column: string, value: string) => void;
+  setValues: (column: string, values: string[]) => void;
+  setRange: (column: string, range: { min: number; max: number } | null) => void;
+  setFilters: (filters: FilterState) => void;
+  clearFilters: () => void;
+  selectRow: (index: number) => void;
+}
+
+/**
+ * Puts a catalog row's file in the viewer. A row whose file is missing is not an
+ * error — the viewer simply keeps showing what it had, and the results strip
+ * says why that row can't be opened.
+ */
+async function loadRow(row: CatalogRow): Promise<void> {
+  const source = row.link.source;
+  if (!source) return;
+  const archive = useArchiveStore.getState();
+  if (source.kind === "session") await archive.select(source.entryId);
+  else await archive.addSample(source.url, row.identifier || source.name);
 }
 
 /** Recomputes the per-row projections whenever the schema or the pool changes. */
@@ -103,10 +137,32 @@ function buildRows(
 }
 
 export const useCatalogStore = create<CatalogStore>((set, get) => {
+  /**
+   * Re-runs the filters and puts the best match in the viewer. Every path that
+   * can change what should be on screen ends here — a chip, a slider, the chat,
+   * a newly resolved file — so the widgets and the conversation can never
+   * disagree about what is being shown.
+   */
+  function applyFilters() {
+    const { rows, filters, selectedIndex } = get();
+    const results = matchRows(rows, filters);
+
+    // Keep the current design if it survived the change; otherwise open the best
+    // match immediately. A filter that doesn't load a ring isn't a filter.
+    const keep =
+      selectedIndex !== null &&
+      results.rows.some((row) => row.index === selectedIndex);
+    const target = keep ? (rows[selectedIndex] ?? null) : bestMatch(results.rows);
+
+    set({ results, selectedIndex: target ? target.index : null });
+    if (!keep && target) void loadRow(target);
+  }
+
   function rebuild() {
     const { parsed, schema, pool } = get();
     if (!parsed || !schema) return;
     set({ rows: buildRows(parsed, schema, pool) });
+    applyFilters();
   }
 
   /** Applies a change to one column of the draft. */
@@ -139,6 +195,9 @@ export const useCatalogStore = create<CatalogStore>((set, get) => {
     pool: [],
     error: null,
     busy: false,
+    filters: EMPTY_FILTERS,
+    results: { rows: [], relaxed: [], exact: true },
+    selectedIndex: null,
 
     setPool: (pool) => {
       set({ pool });
@@ -329,7 +388,57 @@ export const useCatalogStore = create<CatalogStore>((set, get) => {
         rows: buildRows(parsed, draft, pool),
         stage: "committed",
         error: null,
+        filters: EMPTY_FILTERS,
+        selectedIndex: null,
       });
+      // Unfiltered is still a result set: the studio lands on a ring, not a blank
+      // viewer waiting to be told what to do.
+      applyFilters();
+    },
+
+    toggleValue: (column, value) => {
+      const current = get().filters.categorical[column] ?? [];
+      const next = current.includes(value)
+        ? current.filter((item) => item !== value)
+        : [...current, value];
+      get().setValues(column, next);
+    },
+
+    setValues: (column, values) => {
+      set((state) => {
+        const categorical = { ...state.filters.categorical };
+        if (values.length === 0) delete categorical[column];
+        else categorical[column] = values;
+        return { filters: { ...state.filters, categorical } };
+      });
+      applyFilters();
+    },
+
+    setRange: (column, range) => {
+      set((state) => {
+        const numeric = { ...state.filters.numeric };
+        if (range === null) delete numeric[column];
+        else numeric[column] = range;
+        return { filters: { ...state.filters, numeric } };
+      });
+      applyFilters();
+    },
+
+    setFilters: (filters) => {
+      set({ filters });
+      applyFilters();
+    },
+
+    clearFilters: () => {
+      set({ filters: EMPTY_FILTERS });
+      applyFilters();
+    },
+
+    selectRow: (index) => {
+      const row = get().rows[index];
+      if (!row) return;
+      set({ selectedIndex: index });
+      void loadRow(row);
     },
 
     reopen: () => set({ stage: "confirming" }),
@@ -343,6 +452,9 @@ export const useCatalogStore = create<CatalogStore>((set, get) => {
         rows: [],
         error: null,
         busy: false,
+        filters: EMPTY_FILTERS,
+        results: { rows: [], relaxed: [], exact: true },
+        selectedIndex: null,
       }),
   };
 });

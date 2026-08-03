@@ -30,7 +30,7 @@ export default function ArchiveSidebar() {
   const ready = entries.filter((entry) => entry.status === "ready").length;
 
   return (
-    <aside className="flex w-72 shrink-0 flex-col rounded-2xl border border-zinc-200 bg-white">
+    <aside className="flex w-full min-w-0 flex-col rounded-2xl border border-zinc-200 bg-white">
       <div className="flex items-baseline justify-between border-b border-zinc-200 px-4 py-3">
         <h2 className="text-sm font-semibold tracking-tight text-zinc-900">
           This session

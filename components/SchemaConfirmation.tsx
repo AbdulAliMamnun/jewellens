@@ -125,8 +125,8 @@ function CategoricalEditor({ column }: { column: ColumnProfile }) {
 
       {blank > 0 ? (
         <p className="text-xs text-zinc-400">
-          {blank} row{blank > 1 ? "s" : ""} leave this blank — they match any filter
-          on it.
+          {blank} row{blank > 1 ? "s" : ""} leave this blank — a filter on this
+          column won&apos;t match them.
         </p>
       ) : null}
     </div>
