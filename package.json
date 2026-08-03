@@ -9,11 +9,12 @@
     "lint": "eslint",
     "check:geometry": "node scripts/check-ring-geometry.mjs",
     "check:design": "node scripts/check-design-step.mjs",
-    "predev": "node scripts/copy-rhino3dm.mjs",
-    "prebuild": "node scripts/copy-rhino3dm.mjs",
+    "predev": "node scripts/copy-rhino3dm.mjs && node scripts/make-test-3dm.mjs && node scripts/make-test-catalog.mjs",
+    "prebuild": "node scripts/copy-rhino3dm.mjs && node scripts/make-test-3dm.mjs && node scripts/make-test-catalog.mjs",
     "check:3dm": "node scripts/make-test-3dm.mjs && node scripts/check-3dm.mjs && node scripts/check-archive-parts.mjs",
     "check:archive": "node scripts/check-archive-parts.mjs",
-    "make:catalog": "node scripts/make-test-catalog.mjs"
+    "make:catalog": "node scripts/make-test-catalog.mjs",
+    "check:catalog": "node scripts/make-test-catalog.mjs && node scripts/check-catalog.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.115.0",
