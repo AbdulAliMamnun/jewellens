@@ -4,6 +4,7 @@ import { useRef, useState } from "react";
 
 import ArchiveSidebar from "@/components/ArchiveSidebar";
 import ArchiveViewer from "@/components/ArchiveViewer";
+import CatalogChat from "@/components/CatalogChat";
 import CatalogUpload from "@/components/CatalogUpload";
 import DesignerViewer from "@/components/DesignerViewer";
 import FilterPanel from "@/components/FilterPanel";
@@ -144,7 +145,14 @@ export default function CatalogWorkspace() {
 
         <div className="flex min-w-0 flex-1 flex-col gap-3">
           <ResultsStrip />
-          <ArchiveViewer />
+          {/* One prompt box under the viewer — it both retrieves and edits. */}
+          <ArchiveViewer
+            footerExtra={
+              <div className="mx-auto w-full max-w-2xl">
+                <CatalogChat />
+              </div>
+            }
+          />
         </div>
       </div>
     </div>

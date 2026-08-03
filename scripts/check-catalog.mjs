@@ -5,15 +5,19 @@
  *
  * COVERED offline: spreadsheet parsing (messy carats, blank cells), the sample
  * cap that keeps the catalog in the browser, canonical-value grouping, role
- * reconciliation for every role, and file-link resolution against the archive
- * folder + session uploads including the deliberate broken link.
+ * reconciliation for every role, file-link resolution against the archive folder
+ * + session uploads including the deliberate broken link, filter semantics, the
+ * nearest-match relaxation path, and reconciliation of a model's filter answer
+ * against the real schema.
  *
  * COVERED live (only with ANTHROPIC_API_KEY): role inference — whether Claude
- * actually labels the ID, file-link, categorical, numeric and text columns of a
- * real messy sheet correctly, and groups RG/rose gold/Rose Gold/14k rose.
+ * labels the ID, file-link, categorical, numeric and text columns of a real
+ * messy sheet correctly and groups RG/rose gold/Rose Gold/14k rose — and intent
+ * classification: retrieval vs. edit vs. neither, including a refinement turn
+ * and a value this catalog does not stock.
  *
- * NOT COVERED: anything visual — the confirmation screen's merge/split controls
- * and the preview table.
+ * NOT COVERED: anything visual — the confirmation screen's merge/split controls,
+ * the preview table, and whether the auto-loaded ring actually renders.
  */
 import { readFileSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -34,6 +38,7 @@ import {
 } from "../lib/catalog-schema.ts";
 import { resolveLink, fileNameFromLink, resolutionBadge } from "../lib/file-resolution.ts";
 import {
+  EMPTY_FILTERS,
   bestMatch,
   filterColumns,
   matchRows,
@@ -42,6 +47,14 @@ import {
   valuesInUse,
 } from "../lib/catalog-filter.ts";
 import { PROFILE_SCHEMA_SYSTEM_PROMPT } from "../lib/profile-prompt.ts";
+import { PARSE_QUERY_SYSTEM_PROMPT } from "../lib/query-prompt.ts";
+import {
+  buildVocabulary,
+  describeFilters,
+  isFilterEmpty,
+  queryResponseSchema,
+  reconcileQuery,
+} from "../lib/query-step.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const FIXTURE = join(ROOT, "public", "test-catalog.xlsx");
@@ -490,6 +503,148 @@ console.log("\nmatchRows");
   );
 }
 
+// --- query reconciliation -------------------------------------------------
+console.log("\nreconcileQuery");
+{
+  const schema = {
+    columns: [
+      metalColumn,
+      {
+        name: "Carat",
+        role: "numeric_range",
+        canonical_label: "carat",
+        values: [],
+        range: { min: 0, max: 2.05 },
+      },
+    ],
+    file_link_column: "File Link",
+    notes: "",
+  };
+  const rows = catalog.rows.map((raw, index) => ({
+    index,
+    identifier: raw["Design ID"],
+    canonical: { Metal: canonicalFor(metalColumn, raw["Metal"]) },
+    numeric: { Carat: parseNumeric(raw["Carat"]) },
+    link: resolveLink(raw["File Link"], pool),
+  }));
+  const current = { categorical: { Metal: ["platinum"] }, numeric: {} };
+  const answer = (overrides) => ({
+    intent: "retrieve",
+    filters: { categorical: {}, numeric: {} },
+    replace: true,
+    assistantNote: "ok",
+    unhandled: [],
+    ...overrides,
+  });
+
+  check(
+    "vocabulary is aggregate only — columns and values, never rows",
+    JSON.stringify(buildVocabulary(schema, rows)) ===
+      JSON.stringify({
+        categorical: [
+          { column: "Metal", label: "metal", values: ["rose gold", "yellow gold", "platinum"] },
+        ],
+        numeric: [{ column: "Carat", label: "carat", min: 0, max: 2.05 }],
+      }),
+    JSON.stringify(buildVocabulary(schema, rows)),
+  );
+
+  const clean = reconcileQuery(
+    answer({ filters: { categorical: { Metal: ["rose gold"] }, numeric: {} } }),
+    schema,
+    rows,
+    current,
+  );
+  check(
+    "a known value passes through",
+    JSON.stringify(clean.filters.categorical) === JSON.stringify({ Metal: ["rose gold"] }),
+  );
+  check("…and replaces the previous search", clean.unmatched.length === 0);
+
+  const refine = reconcileQuery(
+    answer({
+      replace: false,
+      filters: { categorical: {}, numeric: { Carat: { min: 1, max: 1.5 } } },
+    }),
+    schema,
+    rows,
+    current,
+  );
+  check(
+    "replace:false narrows what is already on screen",
+    JSON.stringify(refine.filters.categorical) === JSON.stringify({ Metal: ["platinum"] }) &&
+      JSON.stringify(refine.filters.numeric.Carat) === JSON.stringify({ min: 1, max: 1.5 }),
+    JSON.stringify(refine.filters),
+  );
+
+  const invented = reconcileQuery(
+    answer({ filters: { categorical: { Metal: ["palladium"] }, numeric: {} } }),
+    schema,
+    rows,
+    current,
+  );
+  check(
+    "a value this catalog doesn't have is reported, not applied",
+    invented.unmatched.includes("palladium") &&
+      Object.keys(invented.filters.categorical).length === 0,
+  );
+
+  const wrongColumn = reconcileQuery(
+    answer({ filters: { categorical: { Vibe: ["classic"] }, numeric: {} } }),
+    schema,
+    rows,
+    current,
+  );
+  check(
+    "a column this catalog doesn't have is reported, not applied",
+    wrongColumn.unmatched.includes("classic"),
+  );
+
+  const asVariant = reconcileQuery(
+    answer({ filters: { categorical: { Metal: ["RG"] }, numeric: {} } }),
+    schema,
+    rows,
+    current,
+  );
+  check(
+    "a variant spelling still resolves to the confirmed value",
+    JSON.stringify(asVariant.filters.categorical) === JSON.stringify({ Metal: ["rose gold"] }),
+    JSON.stringify(asVariant.filters.categorical),
+  );
+
+  const clamped = reconcileQuery(
+    answer({ filters: { categorical: {}, numeric: { Carat: { min: -5, max: 99 } } } }),
+    schema,
+    rows,
+    current,
+  );
+  check(
+    "a range is clamped to what the sheet contains",
+    JSON.stringify(clamped.filters.numeric.Carat) === JSON.stringify({ min: 0, max: 2.05 }),
+    JSON.stringify(clamped.filters.numeric),
+  );
+
+  const offSheet = reconcileQuery(
+    answer({ filters: { categorical: {}, numeric: { Carat: { min: 8, max: 10 } } } }),
+    schema,
+    rows,
+    current,
+  );
+  check(
+    "a range entirely outside the catalog is said out loud, not filtered to nothing",
+    offSheet.unmatched.length === 1 && Object.keys(offSheet.filters.numeric).length === 0,
+    JSON.stringify(offSheet),
+  );
+
+  check(
+    "filters read back in plain language",
+    describeFilters({ categorical: { Metal: ["rose gold"] }, numeric: { Carat: { min: 1, max: 2 } } }, schema) ===
+      "metal: rose gold, carat: 1–2",
+    describeFilters({ categorical: { Metal: ["rose gold"] }, numeric: { Carat: { min: 1, max: 2 } } }, schema),
+  );
+  check("an empty search knows it is empty", isFilterEmpty({ categorical: {}, numeric: {} }));
+}
+
 // --- the prompt's promises ------------------------------------------------
 console.log("\nPROFILE_SCHEMA_SYSTEM_PROMPT");
 check(
@@ -605,6 +760,183 @@ Return the JSON object only.`,
       !profile.columns
         .find((column) => column.name === "Setting")
         ?.values.some((value) => !value.canonical.trim()),
+    );
+  }
+}
+
+// --- live intent classification (needs a key) -----------------------------
+if (!process.env.ANTHROPIC_API_KEY) {
+  console.log("\nlive parse-query — SKIPPED (no ANTHROPIC_API_KEY)");
+} else {
+  console.log("\nlive parse-query (/api/parse-query contract)");
+  const { default: Anthropic } = await import("@anthropic-ai/sdk");
+  const { extractJsonObject } = await import("../lib/design-step.ts");
+  const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+
+  const schema = {
+    columns: [
+      metalColumn,
+      {
+        name: "Stone Shape",
+        role: "categorical_filter",
+        canonical_label: "stone_shape",
+        values: [
+          { canonical: "oval", variants: ["Oval"] },
+          { canonical: "round", variants: ["Round"] },
+          { canonical: "emerald", variants: ["Emerald"] },
+          { canonical: "pear", variants: ["Pear"] },
+        ],
+        range: null,
+      },
+      {
+        name: "Carat",
+        role: "numeric_range",
+        canonical_label: "carat",
+        values: [],
+        range: { min: 0, max: 2.05 },
+      },
+    ],
+    file_link_column: "File Link",
+    notes: "",
+  };
+  const rows = catalog.rows.map((raw, index) => ({
+    index,
+    identifier: raw["Design ID"],
+    canonical: {
+      Metal: canonicalFor(metalColumn, raw["Metal"]),
+      "Stone Shape": canonicalFor(schema.columns[1], raw["Stone Shape"]),
+    },
+    numeric: { Carat: parseNumeric(raw["Carat"]) },
+    link: resolveLink(raw["File Link"], pool),
+  }));
+  const vocabulary = buildVocabulary(schema, rows);
+
+  async function ask(userMessage, hasDesignLoaded = true) {
+    const message = await client.messages.create({
+      model: "claude-sonnet-4-6",
+      max_tokens: 1024,
+      temperature: 0,
+      system: PARSE_QUERY_SYSTEM_PROMPT,
+      messages: [
+        {
+          role: "user",
+          content: `Catalog vocabulary (the only columns and values that exist):
+${JSON.stringify(vocabulary, null, 1)}
+
+A design is ${hasDesignLoaded ? "currently on screen and can be edited" : "NOT on screen — an edit request has nothing to act on yet"}.
+
+They said: ${JSON.stringify(userMessage)}
+
+Return the JSON object only.`,
+        },
+      ],
+    });
+    const raw = message.content
+      .filter((block) => block.type === "text")
+      .map((block) => block.text)
+      .join("");
+    const validated = queryResponseSchema.safeParse(JSON.parse(extractJsonObject(raw)));
+    return validated.success ? validated.data : null;
+  }
+
+  const asked = await Promise.all(
+    [
+      "show me the rose gold ovals",
+      "under 1.5 carats",
+      "hide the halo",
+      "make the centre stone a sapphire",
+      "design me something with a twisted shank",
+      "do you have any of those in palladium?",
+      "actually, platinum instead",
+    ].map((prompt) => ask(prompt)),
+  );
+  const [ovals, light, hideHalo, sapphire, twisted, palladium, platinum] = asked;
+
+  check("every reply validated", asked.every(Boolean));
+
+  check("“rose gold ovals” is retrieval", ovals?.intent === "retrieve", ovals?.intent);
+  if (ovals) {
+    const { filters, unmatched } = reconcileQuery(ovals, schema, rows, EMPTY_FILTERS);
+    check(
+      "…mapping to both columns, in the catalog's own spelling",
+      JSON.stringify(filters.categorical) ===
+        JSON.stringify({ Metal: ["rose gold"], "Stone Shape": ["oval"] }),
+      JSON.stringify(filters.categorical),
+    );
+    check("…with nothing left over", unmatched.length === 0, JSON.stringify(unmatched));
+    check(
+      "…and it actually finds a design",
+      matchRows(rows, filters).rows.length > 0 && matchRows(rows, filters).exact,
+    );
+  }
+
+  check("“under 1.5 carats” is retrieval", light?.intent === "retrieve", light?.intent);
+  if (light) {
+    const { filters } = reconcileQuery(light, schema, rows, EMPTY_FILTERS);
+    check(
+      "…as a range topping out at 1.5",
+      Math.abs((filters.numeric.Carat?.max ?? -1) - 1.5) < 1e-9,
+      JSON.stringify(filters.numeric),
+    );
+  }
+
+  check("“hide the halo” is an edit", hideHalo?.intent === "edit", hideHalo?.intent);
+  check(
+    "“make the centre stone a sapphire” is an edit",
+    sapphire?.intent === "edit",
+    sapphire?.intent,
+  );
+  check(
+    "…and edits never carry filters",
+    Object.keys(hideHalo?.filters.categorical ?? {}).length === 0 &&
+      Object.keys(sapphire?.filters.numeric ?? {}).length === 0,
+  );
+
+  check(
+    "a ring that has to be built is neither",
+    twisted?.intent === "other",
+    twisted?.intent,
+  );
+  check(
+    "…and the reply points at the designer rather than pretending",
+    /design/i.test(twisted?.assistantNote ?? ""),
+    twisted?.assistantNote,
+  );
+
+  if (palladium) {
+    const { filters, unmatched } = reconcileQuery(
+      palladium,
+      schema,
+      rows,
+      EMPTY_FILTERS,
+    );
+    check(
+      "a metal the catalog doesn't stock is not silently swapped",
+      !JSON.stringify(filters).includes("gold") &&
+        !JSON.stringify(filters).includes("platinum"),
+      JSON.stringify(filters),
+    );
+    check(
+      "…it comes back as an unhandled term",
+      [...(palladium.unhandled ?? []), ...unmatched].some((term) => /palladium/i.test(term)),
+      JSON.stringify([palladium.unhandled, unmatched]),
+    );
+  }
+
+  check(
+    "“actually, platinum instead” is retrieval",
+    platinum?.intent === "retrieve",
+    platinum?.intent,
+  );
+  if (platinum) {
+    const { filters } = reconcileQuery(platinum, schema, rows, {
+      categorical: { Metal: ["rose gold"] },
+      numeric: {},
+    });
+    check(
+      "…and swaps the metal rather than adding to it",
+      JSON.stringify(filters.categorical.Metal) === JSON.stringify(["platinum"]),
+      JSON.stringify(filters.categorical),
     );
   }
 }

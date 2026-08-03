@@ -28,6 +28,13 @@ import {
   type LinkResolution,
   type ResolvableFile,
 } from "@/lib/file-resolution";
+import {
+  buildVocabulary,
+  describeFilters,
+  isFilterEmpty,
+  queryResponseSchema,
+  reconcileQuery,
+} from "@/lib/query-step";
 
 /** A catalog row with everything the dashboard needs precomputed. */
 export interface CatalogRow {
@@ -42,6 +49,18 @@ export interface CatalogRow {
 }
 
 export type CatalogStage = "empty" | "parsed" | "profiling" | "confirming" | "committed";
+
+export interface ChatMessage {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+}
+
+let messageCounter = 0;
+const nextMessageId = () => `catalog-message-${++messageCounter}`;
+
+/** How much of the conversation the classifier sees. */
+const HISTORY_TURNS = 6;
 
 interface CatalogStore {
   stage: CatalogStage;
@@ -76,6 +95,14 @@ interface CatalogStore {
   reset: () => void;
   setPool: (pool: ResolvableFile[]) => void;
   refreshArchivePool: () => Promise<void>;
+
+  /** The one prompt box: retrieval, edits and honest refusals all land here. */
+  messages: ChatMessage[];
+  pending: boolean;
+  chatError: string | null;
+  unhandled: string[];
+  sendQuery: (text: string) => Promise<void>;
+  dismissChatError: () => void;
 
   toggleValue: (column: string, value: string) => void;
   setValues: (column: string, values: string[]) => void;
@@ -396,6 +423,124 @@ export const useCatalogStore = create<CatalogStore>((set, get) => {
       applyFilters();
     },
 
+    messages: [],
+    pending: false,
+    chatError: null,
+    unhandled: [],
+
+    dismissChatError: () => set({ chatError: null }),
+
+    /**
+     * One prompt box, three destinations. Retrieval writes the same filter state
+     * the widgets write, so the panel visibly updates and there is only ever one
+     * answer to "what are we looking at". Edits are handed to the archive engine
+     * that already knows how to touch geometry. Anything else gets an honest
+     * sentence rather than a silent no-op.
+     */
+    sendQuery: async (text) => {
+      const trimmed = text.trim();
+      const { schema, rows, filters, pending } = get();
+      if (!trimmed || pending || !schema) return;
+
+      const briefHistory = get()
+        .messages.slice(-HISTORY_TURNS)
+        .map((message) => ({ role: message.role, content: message.content }));
+
+      set((state) => ({
+        messages: [
+          ...state.messages,
+          { id: nextMessageId(), role: "user", content: trimmed },
+        ],
+        pending: true,
+        chatError: null,
+        unhandled: [],
+      }));
+
+      const reply = (content: string, unhandled: string[] = []) =>
+        set((state) => ({
+          messages: [
+            ...state.messages,
+            { id: nextMessageId(), role: "assistant", content },
+          ],
+          unhandled,
+          pending: false,
+        }));
+
+      try {
+        const archive = useArchiveStore.getState();
+        const activeEntry = archive.entries.find(
+          (entry) => entry.id === archive.activeId,
+        );
+
+        const response = await fetch("/api/parse-query", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            userMessage: trimmed,
+            // Column names and the values in use — aggregate, never the rows.
+            vocabulary: buildVocabulary(schema, rows),
+            hasDesignLoaded: activeEntry?.status === "ready",
+            briefHistory,
+          }),
+        });
+
+        const payload: unknown = await response.json().catch(() => null);
+        if (!response.ok) {
+          const message =
+            payload && typeof payload === "object" && "error" in payload
+              ? String((payload as { error: unknown }).error)
+              : `That didn't go through (${response.status}).`;
+          throw new Error(message);
+        }
+
+        const parsed = queryResponseSchema.safeParse(payload);
+        if (!parsed.success) throw new Error("Got an unexpected answer back.");
+        const data = parsed.data;
+
+        if (data.intent === "edit") {
+          if (activeEntry?.status !== "ready") {
+            reply(
+              "There's no design on screen yet — pick one from the catalog first, then I can change it.",
+            );
+            return;
+          }
+          // The archive engine owns edits; it keeps its own transcript, so this
+          // one just records that the request was handed over.
+          set({ pending: false });
+          set((state) => ({
+            messages: [
+              ...state.messages,
+              { id: nextMessageId(), role: "assistant", content: data.assistantNote },
+            ],
+          }));
+          await archive.sendArchiveMessage(trimmed);
+          return;
+        }
+
+        if (data.intent === "other") {
+          reply(data.assistantNote, data.unhandled);
+          return;
+        }
+
+        const { filters: next, unmatched } = reconcileQuery(data, schema, rows, filters);
+        get().setFilters(next);
+
+        const found = get().results;
+        const summary = isFilterEmpty(next)
+          ? "Showing the whole catalog."
+          : `${describeFilters(next, schema)} — ${found.rows.length} design${
+              found.rows.length === 1 ? "" : "s"
+            }${found.exact ? "" : " (nearest match)"}.`;
+
+        reply(`${data.assistantNote} ${summary}`, [...data.unhandled, ...unmatched]);
+      } catch (cause) {
+        set({
+          pending: false,
+          chatError: cause instanceof Error ? cause.message : "Something went wrong.",
+        });
+      }
+    },
+
     toggleValue: (column, value) => {
       const current = get().filters.categorical[column] ?? [];
       const next = current.includes(value)
@@ -455,6 +600,9 @@ export const useCatalogStore = create<CatalogStore>((set, get) => {
         filters: EMPTY_FILTERS,
         results: { rows: [], relaxed: [], exact: true },
         selectedIndex: null,
+        messages: [],
+        unhandled: [],
+        chatError: null,
       }),
   };
 });
