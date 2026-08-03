@@ -1,5 +1,6 @@
 import { create } from "zustand";
 
+import { postJson } from "@/lib/api-call";
 import { useArchiveStore } from "@/lib/archive-store";
 import {
   parseCatalogFile,
@@ -102,7 +103,10 @@ interface CatalogStore {
   chatError: string | null;
   unhandled: string[];
   sendQuery: (text: string) => Promise<void>;
+  retryLastQuery: () => Promise<void>;
   dismissChatError: () => void;
+  /** The last thing asked for, so a failed turn can be retried in one click. */
+  lastQuery: string | null;
 
   toggleValue: (column: string, value: string) => void;
   setValues: (column: string, values: string[]) => void;
@@ -291,34 +295,24 @@ export const useCatalogStore = create<CatalogStore>((set, get) => {
 
       set({ stage: "profiling", busy: true, error: null });
       try {
-        const response = await fetch("/api/profile-schema", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          // Only the headers and the sample leave the browser.
-          body: JSON.stringify({
-            headers: parsed.headers,
-            sampleRows: sampleForProfiling(parsed),
-          }),
+        // Only the column names and the sample leave the browser.
+        const payload = await postJson<unknown>("/api/profile-schema", {
+          headers: parsed.headers,
+          sampleRows: sampleForProfiling(parsed),
         });
 
-        const payload: unknown = await response.json().catch(() => null);
-        if (!response.ok) {
-          const message =
-            payload && typeof payload === "object" && "error" in payload
-              ? String((payload as { error: unknown }).error)
-              : `Profiling failed (${response.status}).`;
-          throw new Error(message);
-        }
-
         const validated = schemaProfileSchema.safeParse(payload);
-        if (!validated.success) throw new Error("The profiler returned an unexpected shape.");
+        if (!validated.success) throw new Error("That came back garbled — try again.");
 
         set({ draft: validated.data, stage: "confirming", busy: false });
       } catch (cause) {
         set({
           busy: false,
           stage: "parsed",
-          error: cause instanceof Error ? cause.message : "Could not profile that catalog.",
+          error:
+            cause instanceof Error
+              ? cause.message
+              : "Couldn't read that catalog — try again.",
         });
       }
     },
@@ -427,6 +421,7 @@ export const useCatalogStore = create<CatalogStore>((set, get) => {
     pending: false,
     chatError: null,
     unhandled: [],
+    lastQuery: null,
 
     dismissChatError: () => set({ chatError: null }),
 
@@ -454,6 +449,7 @@ export const useCatalogStore = create<CatalogStore>((set, get) => {
         pending: true,
         chatError: null,
         unhandled: [],
+        lastQuery: trimmed,
       }));
 
       const reply = (content: string, unhandled: string[] = []) =>
@@ -472,29 +468,16 @@ export const useCatalogStore = create<CatalogStore>((set, get) => {
           (entry) => entry.id === archive.activeId,
         );
 
-        const response = await fetch("/api/parse-query", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            userMessage: trimmed,
-            // Column names and the values in use — aggregate, never the rows.
-            vocabulary: buildVocabulary(schema, rows),
-            hasDesignLoaded: activeEntry?.status === "ready",
-            briefHistory,
-          }),
+        const payload = await postJson<unknown>("/api/parse-query", {
+          userMessage: trimmed,
+          // Column names and the values in use — aggregate, never the designs.
+          vocabulary: buildVocabulary(schema, rows),
+          hasDesignLoaded: activeEntry?.status === "ready",
+          briefHistory,
         });
 
-        const payload: unknown = await response.json().catch(() => null);
-        if (!response.ok) {
-          const message =
-            payload && typeof payload === "object" && "error" in payload
-              ? String((payload as { error: unknown }).error)
-              : `That didn't go through (${response.status}).`;
-          throw new Error(message);
-        }
-
         const parsed = queryResponseSchema.safeParse(payload);
-        if (!parsed.success) throw new Error("Got an unexpected answer back.");
+        if (!parsed.success) throw new Error("That answer came back garbled — try again.");
         const data = parsed.data;
 
         if (data.intent === "edit") {
@@ -536,9 +519,23 @@ export const useCatalogStore = create<CatalogStore>((set, get) => {
       } catch (cause) {
         set({
           pending: false,
-          chatError: cause instanceof Error ? cause.message : "Something went wrong.",
+          chatError:
+            cause instanceof Error ? cause.message : "That didn't go through — try again.",
         });
       }
+    },
+
+    /** Re-sends the last thing asked for, without retyping it. */
+    retryLastQuery: async () => {
+      const last = get().lastQuery;
+      if (!last) return;
+      set((state) => ({
+        messages: state.messages.filter(
+          (message, index) =>
+            !(index === state.messages.length - 1 && message.content === last),
+        ),
+      }));
+      await get().sendQuery(last);
     },
 
     toggleValue: (column, value) => {
@@ -603,6 +600,7 @@ export const useCatalogStore = create<CatalogStore>((set, get) => {
         messages: [],
         unhandled: [],
         chatError: null,
+        lastQuery: null,
       }),
   };
 });

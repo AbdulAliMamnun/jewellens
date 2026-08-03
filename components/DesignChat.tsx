@@ -21,6 +21,9 @@ export default function DesignChat() {
   const adjusted = useDesignStore((state) => state.adjusted);
   const sendMessage = useDesignStore((state) => state.sendMessage);
   const dismissUnhandled = useDesignStore((state) => state.dismissUnhandled);
+  const error = useDesignStore((state) => state.error);
+  const dismissError = useDesignStore((state) => state.dismissError);
+  const retryLastMessage = useDesignStore((state) => state.retryLastMessage);
 
   const [draft, setDraft] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -76,6 +79,31 @@ export default function DesignChat() {
         </div>
       ) : null}
 
+      {/* A failed turn says so and offers the same request again — the input
+          never goes dead in the middle of a meeting. */}
+      {error ? (
+        <div className="mb-2 flex items-start justify-center gap-2">
+          <span className="flex items-center gap-2 rounded-full bg-white/95 px-3 py-1 text-xs font-medium text-amber-900 shadow-sm">
+            {error}
+            <button
+              type="button"
+              onClick={() => void retryLastMessage()}
+              className="rounded-full bg-zinc-900 px-2.5 py-0.5 text-[11px] font-medium text-white transition hover:bg-zinc-700"
+            >
+              Try again
+            </button>
+            <button
+              type="button"
+              onClick={dismissError}
+              aria-label="Dismiss"
+              className="text-zinc-400 transition hover:text-zinc-700"
+            >
+              ✕
+            </button>
+          </span>
+        </div>
+      ) : null}
+
       {adjusted.length > 0 ? (
         <div className="mb-2 flex flex-wrap justify-center gap-2">
           {adjusted.map((item) => (
@@ -96,7 +124,7 @@ export default function DesignChat() {
               key={term}
               className="flex items-center gap-2 rounded-full bg-zinc-800/85 px-3 py-1 text-xs font-medium text-zinc-100 backdrop-blur"
             >
-              not yet supported: {term} — phase 2
+              not something I can build yet: {term}
               <button
                 type="button"
                 onClick={dismissUnhandled}

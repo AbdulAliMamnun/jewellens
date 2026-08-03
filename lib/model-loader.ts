@@ -90,9 +90,18 @@ export interface LoadedModel {
   instancePlacements: number;
 }
 
+/**
+ * What the loader is doing right now. A 50MB .3dm spends most of its time
+ * getting to the browser and the rest being turned into geometry — and the
+ * second stretch blocks the tab, so it has to be announced rather than looking
+ * like a freeze.
+ */
+export type LoadPhase = "downloading" | "reading" | "preparing";
+
 export interface LoadOptions {
-  /** 0..1 across reading and parsing. */
+  /** 0..1 across reading and preparing. */
   onProgress?: (progress: number) => void;
+  onPhase?: (phase: LoadPhase) => void;
   signal?: AbortSignal;
 }
 
@@ -148,7 +157,7 @@ function normalize(geometries: THREE.BufferGeometry[]): THREE.Vector3 {
     if (geometry.boundingBox) bounds.union(geometry.boundingBox);
   }
   if (bounds.isEmpty()) {
-    throw new ModelLoadError("empty", "The file parsed, but contains no geometry.");
+    throw new ModelLoadError("empty", "The file opened, but there's nothing in it to show.");
   }
 
   const size = bounds.getSize(new THREE.Vector3());
@@ -307,7 +316,7 @@ async function build3dm(label: string, data: ArrayBuffer): Promise<LoadedModel> 
     throw new ModelLoadError(
       "parse",
       `Could not read ${label} as a Rhino file.`,
-      "The file may be corrupt, or saved by a Rhino version this reader doesn't support.",
+      "The file may be damaged, or saved by a Rhino version this app can't open yet.",
     );
   }
 
@@ -399,17 +408,19 @@ export async function loadModelFromFile(
   if (!format) {
     throw new ModelLoadError(
       "unsupported",
-      `${file.name} is not a supported model — use ${SUPPORTED_EXTENSIONS.join(", ")}.`,
+      `${file.name} isn't a design file — use ${SUPPORTED_EXTENSIONS.join(", ")}.`,
     );
   }
 
-  // Reading is most of the wall clock on big files; parsing is the last stretch.
+  // Reading is most of the wall clock on big files; preparing is the last stretch.
+  options.onPhase?.("reading");
   const data = await readWithProgress(
     file,
     options.onProgress ? (progress) => options.onProgress?.(progress * 0.85) : undefined,
     options.signal,
   );
   options.onProgress?.(0.85);
+  options.onPhase?.("preparing");
 
   if (format === "3dm") {
     const model = await build3dm(file.name, data);
@@ -424,14 +435,15 @@ export async function loadModelFromFile(
 
 export async function loadModelFromUrl(
   url: string,
-  signal?: AbortSignal,
+  options: LoadOptions = {},
 ): Promise<LoadedModel> {
+  const { onProgress, onPhase, signal } = options;
   const label = decodeURIComponent(url.split("/").pop() || url);
   const format = formatFromName(label);
   if (!format) {
     throw new ModelLoadError(
       "unsupported",
-      `${label} is not a supported model — use ${SUPPORTED_EXTENSIONS.join(", ")}.`,
+      `${label} isn't a design file — use ${SUPPORTED_EXTENSIONS.join(", ")}.`,
     );
   }
 
@@ -449,8 +461,50 @@ export async function loadModelFromUrl(
     );
   }
 
-  const data = await response.arrayBuffer();
-  return format === "3dm" ? build3dm(label, data) : buildMesh(format, label, data);
+  onPhase?.("downloading");
+  const data = await readResponseWithProgress(response, onProgress);
+  onProgress?.(0.85);
+  onPhase?.("preparing");
+
+  // Let the browser paint the "preparing" state before the parse blocks it.
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  const model = format === "3dm" ? await build3dm(label, data) : buildMesh(format, label, data);
+  onProgress?.(1);
+  return model;
+}
+
+/**
+ * Streams a response so a catalog row backed by a big archive file shows the
+ * same progress an uploaded one does. Falls back to a plain read when the
+ * server sends no length.
+ */
+async function readResponseWithProgress(
+  response: Response,
+  onProgress?: (progress: number) => void,
+): Promise<ArrayBuffer> {
+  const total = Number(response.headers.get("content-length") ?? 0);
+  if (!onProgress || !response.body || !total) return response.arrayBuffer();
+
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let received = 0;
+
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    received += value.length;
+    onProgress(Math.min(0.85, (received / total) * 0.85));
+  }
+
+  const merged = new Uint8Array(received);
+  let offset = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return merged.buffer;
 }
 
 /** Releases GPU memory. Call when a model is swapped out or the viewer unmounts. */

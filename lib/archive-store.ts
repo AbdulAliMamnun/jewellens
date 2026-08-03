@@ -1,5 +1,7 @@
 import { create } from "zustand";
 
+import { postJson } from "@/lib/api-call";
+
 import {
   guessPartMaterial,
   type PartIdentity,
@@ -16,6 +18,7 @@ import {
   loadModelFromFile,
   loadModelFromUrl,
   type LoadedModel,
+  type LoadPhase,
   type ModelFormat,
   type ModelLoadErrorCode,
 } from "@/lib/model-loader";
@@ -43,6 +46,8 @@ export interface ArchiveEntry {
   status: EntryStatus;
   /** 0..1 while loading. */
   progress: number;
+  /** What the loader is doing, so a blocking parse doesn't look like a freeze. */
+  phase: LoadPhase | null;
   triangleCount: number | null;
   sizeMm: { x: number; y: number; z: number } | null;
   unitLabel: string | null;
@@ -87,6 +92,8 @@ interface ArchiveStore {
   pending: boolean;
   chatError: string | null;
   unhandled: string[];
+  /** The last edit asked for, so a failed turn can be retried in one click. */
+  lastMessage: string | null;
 
   addFiles: (files: File[]) => Promise<void>;
   addSample: (url: string, name: string) => Promise<void>;
@@ -102,6 +109,7 @@ interface ArchiveStore {
   resetEdits: (entryId: string) => void;
   applyOperations: (entryId: string, operations: ResolvedOperation[]) => void;
   sendArchiveMessage: (text: string) => Promise<void>;
+  retryLastMessage: () => Promise<void>;
   dismissChatError: () => void;
 }
 
@@ -164,16 +172,17 @@ export const useArchiveStore = create<ArchiveStore>((set, get) => {
     const entry = get().entries.find((candidate) => candidate.id === id);
     if (!entry) return;
 
-    patch(id, { status: "loading", progress: 0, error: null });
+    patch(id, { status: "loading", progress: 0, phase: "reading", error: null });
     await yieldToBrowser();
 
     try {
+      const onProgress = (progress: number) => patch(id, { progress });
+      const onPhase = (phase: LoadPhase) => patch(id, { phase });
+
       const model = entry.file
-        ? await loadModelFromFile(entry.file, {
-            onProgress: (progress) => patch(id, { progress }),
-          })
+        ? await loadModelFromFile(entry.file, { onProgress, onPhase })
         : entry.url
-          ? await loadModelFromUrl(entry.url)
+          ? await loadModelFromUrl(entry.url, { onProgress, onPhase })
           : null;
 
       if (!model) throw new ModelLoadError("parse", `${entry.name} is no longer available.`);
@@ -205,6 +214,7 @@ export const useArchiveStore = create<ArchiveStore>((set, get) => {
         partStates,
         status: "ready",
         progress: 1,
+        phase: null,
         triangleCount: model.triangleCount,
         sizeMm: model.sizeMm,
         unitLabel: model.unitLabel,
@@ -215,7 +225,7 @@ export const useArchiveStore = create<ArchiveStore>((set, get) => {
       });
       if (!get().activeId) set({ activeId: id });
     } catch (cause) {
-      patch(id, { status: "error", progress: 0, error: toEntryError(cause) });
+      patch(id, { status: "error", progress: 0, phase: null, error: toEntryError(cause) });
     }
   }
 
@@ -228,6 +238,7 @@ export const useArchiveStore = create<ArchiveStore>((set, get) => {
     pending: false,
     chatError: null,
     unhandled: [],
+    lastMessage: null,
 
     dismissNotice: () => set({ notice: null }),
 
@@ -239,7 +250,7 @@ export const useArchiveStore = create<ArchiveStore>((set, get) => {
         set({
           notice:
             files.length === 0
-              ? "No files found in that drop."
+              ? "Nothing came through in that drop."
               : `None of those ${files.length} file(s) are STL, OBJ or 3DM.`,
         });
         return;
@@ -253,6 +264,7 @@ export const useArchiveStore = create<ArchiveStore>((set, get) => {
         // Big files wait for a deliberate click rather than freezing the tab.
         status: file.size > LARGE_FILE_BYTES ? "oversized" : "queued",
         progress: 0,
+        phase: null,
         triangleCount: null,
         sizeMm: null,
         unitLabel: null,
@@ -271,7 +283,10 @@ export const useArchiveStore = create<ArchiveStore>((set, get) => {
 
       set((state) => ({
         entries: [...state.entries, ...created],
-        notice: skipped > 0 ? `Skipped ${skipped} unsupported file(s).` : null,
+        notice:
+          skipped > 0
+            ? `Left out ${skipped} file(s) that aren't STL, OBJ or 3DM.`
+            : null,
       }));
 
       // Sequential: parsing is synchronous and CPU-bound, so running these in
@@ -295,6 +310,7 @@ export const useArchiveStore = create<ArchiveStore>((set, get) => {
         sizeBytes: 0,
         status: "queued",
         progress: 0,
+        phase: null,
         triangleCount: null,
         sizeMm: null,
         unitLabel: null,
@@ -471,35 +487,23 @@ export const useArchiveStore = create<ArchiveStore>((set, get) => {
         pending: true,
         chatError: null,
         unhandled: [],
+        lastMessage: trimmed,
       }));
 
       try {
-        const response = await fetch("/api/archive-step", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            parts: entry.parts.map((part) => ({
-              id: part.id,
-              name: part.name,
-              layerPath: part.layerPath,
-              definitionName: part.definitionName,
-              objectNames: part.objectNames,
-            })),
-            hasParts: entry.hasParts,
-            assumedRingSize: entry.assumedRingSize,
-            userMessage: trimmed,
-            briefHistory,
-          }),
+        const payload = await postJson<unknown>("/api/archive-step", {
+          parts: entry.parts.map((part) => ({
+            id: part.id,
+            name: part.name,
+            layerPath: part.layerPath,
+            definitionName: part.definitionName,
+            objectNames: part.objectNames,
+          })),
+          hasParts: entry.hasParts,
+          assumedRingSize: entry.assumedRingSize,
+          userMessage: trimmed,
+          briefHistory,
         });
-
-        const payload: unknown = await response.json().catch(() => null);
-        if (!response.ok) {
-          const message =
-            payload && typeof payload === "object" && "error" in payload
-              ? String((payload as { error: unknown }).error)
-              : `Edit failed (${response.status}).`;
-          throw new Error(message);
-        }
 
         const data = payload as {
           operations: ResolvedOperation[];
@@ -520,9 +524,23 @@ export const useArchiveStore = create<ArchiveStore>((set, get) => {
       } catch (cause) {
         set({
           pending: false,
-          chatError: cause instanceof Error ? cause.message : "Something went wrong.",
+          chatError:
+            cause instanceof Error ? cause.message : "That didn't go through — try again.",
         });
       }
+    },
+
+    /** Re-sends the last edit asked for, without retyping it. */
+    retryLastMessage: async () => {
+      const last = get().lastMessage;
+      if (!last) return;
+      set((state) => ({
+        messages: state.messages.filter(
+          (message, index) =>
+            !(index === state.messages.length - 1 && message.content === last),
+        ),
+      }));
+      await get().sendArchiveMessage(last);
     },
 
     clearAll: () => {
@@ -537,6 +555,8 @@ export const useArchiveStore = create<ArchiveStore>((set, get) => {
           messages: [],
           unhandled: [],
           chatError: null,
+          lastMessage: null,
+          pending: false,
         };
       });
     },

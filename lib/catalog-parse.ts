@@ -23,16 +23,13 @@ export function parseCatalogFile(fileName: string, data: ArrayBuffer): ParsedCat
   let book: XLSX.WorkBook;
   try {
     book = XLSX.read(data, { type: "array", raw: false });
-  } catch (cause) {
-    throw new CatalogParseError(
-      `Could not read ${fileName} as a spreadsheet${
-        cause instanceof Error ? ` (${cause.message})` : ""
-      }.`,
-    );
+  } catch {
+    // The underlying reason is never actionable for the person holding the file.
+    throw new CatalogParseError(`Couldn't open ${fileName} — is it an .xlsx or .csv?`);
   }
 
   const sheetName = book.SheetNames[0];
-  if (!sheetName) throw new CatalogParseError(`${fileName} has no sheets.`);
+  if (!sheetName) throw new CatalogParseError(`${fileName} has nothing in it.`);
 
   const sheet = book.Sheets[sheetName];
   const matrix = XLSX.utils.sheet_to_json<unknown[]>(sheet, {
@@ -48,7 +45,9 @@ export function parseCatalogFile(fileName: string, data: ArrayBuffer): ParsedCat
     .map((cell) => String(cell ?? "").trim())
     .filter((header) => header.length > 0);
   if (headers.length === 0) {
-    throw new CatalogParseError(`${fileName} has no column headers in its first row.`);
+    throw new CatalogParseError(
+      `The first row of ${fileName} needs the column names — it looks blank.`,
+    );
   }
 
   const rows: Record<string, string>[] = [];
@@ -64,7 +63,7 @@ export function parseCatalogFile(fileName: string, data: ArrayBuffer): ParsedCat
   }
 
   if (rows.length === 0) {
-    throw new CatalogParseError(`${fileName} has headers but no data rows.`);
+    throw new CatalogParseError(`${fileName} has column names but no designs under them.`);
   }
 
   return { fileName, sheetName, headers, rows };

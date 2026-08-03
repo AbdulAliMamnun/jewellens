@@ -3,6 +3,13 @@
 import { useArchiveStore, type ArchiveEntry } from "@/lib/archive-store";
 import { LARGE_FILE_BYTES } from "@/lib/model-loader";
 
+/** Short forms of the loader's phases for the list. */
+const PHASE_LABELS = {
+  downloading: "Fetching…",
+  reading: "Reading…",
+  preparing: "Preparing…",
+} as const;
+
 function formatBytes(bytes: number): string {
   if (bytes <= 0) return "";
   if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
@@ -33,7 +40,7 @@ export default function ArchiveSidebar() {
     <aside className="flex w-full min-w-0 flex-col rounded-2xl border border-zinc-200 bg-white">
       <div className="flex items-baseline justify-between border-b border-zinc-200 px-4 py-3">
         <h2 className="text-sm font-semibold tracking-tight text-zinc-900">
-          This session
+          Open designs
         </h2>
         {entries.length > 0 ? (
           <button
@@ -63,7 +70,7 @@ export default function ArchiveSidebar() {
       <div className="min-h-0 flex-1 overflow-y-auto p-2">
         {entries.length === 0 ? (
           <p className="px-2 py-6 text-center text-sm text-zinc-400">
-            Uploaded designs appear here. Drop files or a folder onto the viewer.
+            Designs you open appear here. Drop files or a folder onto the viewer.
           </p>
         ) : (
           <ul className="flex flex-col gap-1">
@@ -93,11 +100,13 @@ export default function ArchiveSidebar() {
                         </span>
                         <span className="mt-0.5 block text-xs text-zinc-500">
                           {entry.status === "ready" && entry.triangleCount !== null
-                            ? `${entry.triangleCount.toLocaleString()} tris`
+                            ? `${entry.triangleCount.toLocaleString()} triangles`
                             : entry.status === "loading"
-                              ? `Loading… ${Math.round(entry.progress * 100)}%`
+                              ? `${PHASE_LABELS[entry.phase ?? "reading"]} ${Math.round(
+                                  entry.progress * 100,
+                                )}%`
                               : entry.status === "queued"
-                                ? "Queued"
+                                ? "Waiting its turn"
                                 : entry.status === "oversized"
                                   ? `${formatBytes(entry.sizeBytes)} — large file`
                                   : "Failed"}
@@ -148,9 +157,8 @@ export default function ArchiveSidebar() {
                     {entry.status === "oversized" ? (
                       <div className="mt-2">
                         <p className="text-xs text-amber-700">
-                          Over {Math.round(LARGE_FILE_BYTES / 1024 / 1024)}MB — parsing
-                          runs on the main thread and may freeze the tab for a few
-                          seconds.
+                          Over {Math.round(LARGE_FILE_BYTES / 1024 / 1024)}MB — the page
+                          will pause for a few seconds while a design this big opens.
                         </p>
                         <button
                           type="button"
@@ -193,7 +201,7 @@ export default function ArchiveSidebar() {
 
       {entries.length > 0 ? (
         <p className="border-t border-zinc-200 px-4 py-2 text-xs text-zinc-400">
-          {ready} of {entries.length} ready
+          {ready} of {entries.length} open
         </p>
       ) : null}
     </aside>

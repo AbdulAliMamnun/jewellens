@@ -18,6 +18,7 @@ export default function CatalogChat() {
   const unhandled = useCatalogStore((state) => state.unhandled);
   const chatError = useCatalogStore((state) => state.chatError);
   const send = useCatalogStore((state) => state.sendQuery);
+  const retryQuery = useCatalogStore((state) => state.retryLastQuery);
   const dismissChatError = useCatalogStore((state) => state.dismissChatError);
 
   // The archive engine keeps its own transcript for edits; surface its progress
@@ -26,6 +27,7 @@ export default function CatalogChat() {
   const archiveMessages = useArchiveStore((state) => state.messages);
   const archiveError = useArchiveStore((state) => state.chatError);
   const archiveUnhandled = useArchiveStore((state) => state.unhandled);
+  const retryEdit = useArchiveStore((state) => state.retryLastMessage);
 
   const [draft, setDraft] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -99,17 +101,25 @@ export default function CatalogChat() {
         </div>
       ) : null}
 
+      {/* Calm, one line, and a way to try again — the input stays live. */}
       {error ? (
         <div className="mb-2 flex items-start justify-center gap-2">
-          <span className="flex items-center gap-2 rounded-full bg-white/95 px-3 py-1 text-xs font-medium text-red-700 shadow-sm">
+          <span className="flex items-center gap-2 rounded-full bg-white/95 px-3 py-1 text-xs font-medium text-amber-900 shadow-sm">
             {error}
+            <button
+              type="button"
+              onClick={() => (archiveError ? void retryEdit() : void retryQuery())}
+              className="rounded-full bg-zinc-900 px-2.5 py-0.5 text-[11px] font-medium text-white transition hover:bg-zinc-700"
+            >
+              Try again
+            </button>
             <button
               type="button"
               onClick={() => {
                 dismissChatError();
                 useArchiveStore.getState().dismissChatError();
               }}
-              aria-label="Dismiss error"
+              aria-label="Dismiss"
               className="text-zinc-400 transition hover:text-zinc-700"
             >
               ✕

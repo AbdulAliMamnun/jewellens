@@ -1,4 +1,5 @@
 import CatalogWorkspace from "@/components/CatalogWorkspace";
+import ResetDemo from "@/components/ResetDemo";
 import { APP_NAME, APP_TAGLINE } from "@/lib/brand";
 
 export default function Home() {
@@ -10,6 +11,9 @@ export default function Home() {
             {APP_NAME}
           </h1>
           <p className="text-sm text-zinc-500">{APP_TAGLINE}</p>
+          <div className="ml-auto self-center">
+            <ResetDemo />
+          </div>
         </div>
       </header>
 

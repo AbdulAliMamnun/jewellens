@@ -6,6 +6,14 @@ import ArchiveChat from "@/components/ArchiveChat";
 import PartsPanel from "@/components/PartsPanel";
 import RingViewer from "@/components/RingViewer";
 import { useArchiveStore } from "@/lib/archive-store";
+import type { LoadPhase } from "@/lib/model-loader";
+
+/** Said out loud while a design opens — a blocking step must never look frozen. */
+const PHASE_LABELS: Record<LoadPhase, string> = {
+  downloading: "Fetching the design…",
+  reading: "Reading the file…",
+  preparing: "Preparing the design — a big one takes a few seconds…",
+};
 
 /**
  * The viewer half of the workspace: whatever design is currently active, its
@@ -22,6 +30,12 @@ export default function ArchiveViewer({ footerExtra }: { footerExtra?: ReactNode
   const activeEntry = entries.find((entry) => entry.id === activeId) ?? null;
   const activeModel = activeId ? (models[activeId] ?? null) : null;
   const busy = activeEntry?.status === "loading" || activeEntry?.status === "queued";
+  const busyLabel =
+    activeEntry?.status === "queued"
+      ? "Waiting its turn…"
+      : activeEntry?.phase
+        ? PHASE_LABELS[activeEntry.phase]
+        : undefined;
 
   // A .3dm with nothing drawable isn't a failure to hide in a toast — it's the
   // one thing the user has to act on, so it takes over the empty state.
@@ -45,6 +59,8 @@ export default function ArchiveViewer({ footerExtra }: { footerExtra?: ReactNode
         <RingViewer
           model={activeModel}
           busy={busy}
+          busyLabel={busyLabel}
+          busyProgress={activeEntry?.status === "loading" ? activeEntry.progress : undefined}
           notice={notice}
           onFiles={(files) => void addFiles(files)}
           title={activeEntry?.name ?? null}

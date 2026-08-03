@@ -27,11 +27,11 @@ export const ROLE_LABELS: Record<ColumnRole, string> = {
 };
 
 export const ROLE_HINTS: Record<ColumnRole, string> = {
-  categorical_filter: "A set of known values — becomes chips in the dashboard.",
+  categorical_filter: "A set of known values — becomes filter chips.",
   numeric_range: "A number — becomes a range slider.",
-  identifier: "Names the design; shown on every result card.",
-  file_link: "Points at the CAD or mesh file for the row.",
-  text: "Free notes. Kept, but not filterable.",
+  identifier: "Names the design; shown on every result.",
+  file_link: "Points at the CAD file for each design.",
+  text: "Free notes. Kept, but not something you can filter on.",
 };
 
 export const canonicalValueSchema = z.object({

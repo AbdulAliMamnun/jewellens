@@ -117,7 +117,7 @@ function CategoricalEditor({ column }: { column: ColumnProfile }) {
 
       {unlisted.length > 0 ? (
         <p className="rounded-lg bg-amber-50 px-3 py-1.5 text-xs leading-snug text-amber-900">
-          Also present outside the sample, kept as-is:{" "}
+          Also in your catalog, kept as they are:{" "}
           {unlisted.slice(0, 8).join(", ")}
           {unlisted.length > 8 ? `, +${unlisted.length - 8} more` : ""}.
         </p>
@@ -222,7 +222,7 @@ export default function SchemaConfirmation() {
           Does this look right?
         </h2>
         <p className="mt-1 text-sm text-zinc-600">
-          This is what Claude made of{" "}
+          Here&apos;s what we made of{" "}
           <span className="font-medium text-zinc-800">{parsed.fileName}</span>.
           Rename anything, merge values that mean the same thing, split ones that
           don&apos;t, and change what each column is for. Nothing is used until you

@@ -22,6 +22,7 @@ export default function ArchiveChat({ hasParts }: { hasParts: boolean }) {
   const chatError = useArchiveStore((state) => state.chatError);
   const send = useArchiveStore((state) => state.sendArchiveMessage);
   const dismissChatError = useArchiveStore((state) => state.dismissChatError);
+  const retryLastMessage = useArchiveStore((state) => state.retryLastMessage);
 
   const [draft, setDraft] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -81,12 +82,19 @@ export default function ArchiveChat({ hasParts }: { hasParts: boolean }) {
 
       {chatError ? (
         <div className="mb-2 flex items-start justify-center gap-2">
-          <span className="flex items-center gap-2 rounded-full bg-white/95 px-3 py-1 text-xs font-medium text-red-700 shadow-sm">
+          <span className="flex items-center gap-2 rounded-full bg-white/95 px-3 py-1 text-xs font-medium text-amber-900 shadow-sm">
             {chatError}
             <button
               type="button"
+              onClick={() => void retryLastMessage()}
+              className="rounded-full bg-zinc-900 px-2.5 py-0.5 text-[11px] font-medium text-white transition hover:bg-zinc-700"
+            >
+              Try again
+            </button>
+            <button
+              type="button"
               onClick={dismissChatError}
-              aria-label="Dismiss error"
+              aria-label="Dismiss"
               className="text-zinc-400 transition hover:text-zinc-700"
             >
               ✕

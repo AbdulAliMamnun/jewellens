@@ -7,6 +7,8 @@ import { queryRequestSchema, queryResponseSchema } from "@/lib/query-step";
 
 const MODEL = "claude-sonnet-4-6";
 const MAX_TOKENS = 1024;
+/** Per-call deadline, kept under the browser's own. */
+const CALL_TIMEOUT_MS = 12_000;
 
 function textOf(message: Anthropic.Message): string {
   return message.content
@@ -25,7 +27,7 @@ export async function POST(request: Request) {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
     return NextResponse.json(
-      { error: "ANTHROPIC_API_KEY is not set — add it to .env.local and restart." },
+      { error: "The assistant isn't connected on this machine — add an API key and restart." },
       { status: 500 },
     );
   }
@@ -34,20 +36,22 @@ export async function POST(request: Request) {
   try {
     body = await request.json();
   } catch {
-    return NextResponse.json({ error: "Request body must be JSON." }, { status: 400 });
+    return NextResponse.json({ error: "Something was wrong with that request." }, { status: 400 });
   }
 
   const parsedRequest = queryRequestSchema.safeParse(body);
   if (!parsedRequest.success) {
     return NextResponse.json(
-      { error: "Request did not match the parse-query schema." },
+      { error: "Something was wrong with that request." },
       { status: 400 },
     );
   }
 
   const { userMessage, vocabulary, hasDesignLoaded, briefHistory } = parsedRequest.data;
 
-  const client = new Anthropic({ apiKey });
+  // Give up before the browser does (it waits 15s), so a stalled call comes
+  // back as a sentence rather than a spinner that never stops.
+  const client = new Anthropic({ apiKey, timeout: CALL_TIMEOUT_MS, maxRetries: 0 });
   const messages: Anthropic.MessageParam[] = [
     ...briefHistory.map((turn) => ({ role: turn.role, content: turn.content })),
     {
@@ -78,19 +82,20 @@ Return the JSON object only.`,
     } catch (cause) {
       if (cause instanceof Anthropic.RateLimitError) {
         return NextResponse.json(
-          { error: "Claude is rate limited right now — try again in a moment." },
+          { error: "Too many requests just now — give it a moment and try again." },
           { status: 429 },
         );
       }
       if (cause instanceof Anthropic.AuthenticationError) {
-        return NextResponse.json({ error: "ANTHROPIC_API_KEY was rejected." }, { status: 401 });
+        return NextResponse.json({ error: "The assistant's API key was rejected." }, { status: 401 });
       }
-      const detail = cause instanceof Error ? cause.message : "unknown error";
-      return NextResponse.json({ error: `Could not reach Claude: ${detail}` }, { status: 502 });
+      // Detail goes to the server log, not to the person in the meeting.
+      console.error("Claude call failed:", cause);
+      return NextResponse.json({ error: "Couldn't reach the assistant — try again." }, { status: 502 });
     }
 
     if (message.stop_reason === "refusal") {
-      return NextResponse.json({ error: "Claude declined that request." }, { status: 422 });
+      return NextResponse.json({ error: "The assistant couldn't take that one on." }, { status: 422 });
     }
 
     const raw = textOf(message);
@@ -131,7 +136,7 @@ Return the JSON object only.`,
   }
 
   return NextResponse.json(
-    { error: `Claude returned an unusable answer (${lastProblem}).` },
+    { error: "The answer came back garbled — try again." },
     { status: 502 },
   );
 }

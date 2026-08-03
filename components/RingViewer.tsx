@@ -52,6 +52,10 @@ export interface RingViewerProps {
   model?: LoadedModel | null;
   /** Controlled loading indicator. */
   busy?: boolean;
+  /** What the wait is for, e.g. "Preparing the design…". */
+  busyLabel?: string;
+  /** 0..1 while loading, when it is known. */
+  busyProgress?: number;
   /** Replaces the empty state, e.g. an actionable message about the last file. */
   notice?: ReactNode;
   /**
@@ -92,6 +96,8 @@ export default function RingViewer({
   onError,
   model: controlledModel,
   busy,
+  busyLabel,
+  busyProgress,
   notice,
   onFiles,
   partStates,
@@ -141,7 +147,7 @@ export default function RingViewer({
     const load =
       source.kind === "file"
         ? loadModelFromFile(source.file)
-        : loadModelFromUrl(source.url, abort.signal);
+        : loadModelFromUrl(source.url, { signal: abort.signal });
 
     load
       .then((model) => {
@@ -155,7 +161,7 @@ export default function RingViewer({
       .catch((cause: unknown) => {
         if (cancelled) return;
         const message =
-          cause instanceof Error ? cause.message : "Could not load that model.";
+          cause instanceof Error ? cause.message : "Couldn't open that design.";
         setError({ sourceId: source.id, message });
         onErrorRef.current?.(message);
       });
@@ -314,8 +320,8 @@ export default function RingViewer({
                   <>
                     <p className="text-base font-medium text-zinc-800">
                       {onFiles
-                        ? "Drop ring models or a folder here"
-                        : "Drop a ring model here"}
+                        ? "Drop designs or a folder here"
+                        : "Drop a design here"}
                     </p>
                     <p className="mt-1 text-sm text-zinc-500">
                       STL, OBJ or 3DM — auto-centered and scaled to fit
@@ -333,11 +339,23 @@ export default function RingViewer({
             </div>
           ) : null}
 
+          {/* A big file can block the tab while it is prepared, so the wait
+              always says what it is waiting for. */}
           {status === "loading" ? (
             <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-white/30 backdrop-blur-[2px]">
-              <div className="flex items-center gap-3 rounded-full bg-white/85 px-4 py-2 text-sm font-medium text-zinc-700 shadow-sm">
-                <span className="size-4 animate-spin rounded-full border-2 border-zinc-300 border-t-zinc-800" />
-                Loading model…
+              <div className="w-64 rounded-2xl bg-white/90 px-4 py-3 shadow-sm">
+                <p className="flex items-center gap-3 text-sm font-medium text-zinc-700">
+                  <span className="size-4 shrink-0 animate-spin rounded-full border-2 border-zinc-300 border-t-zinc-800" />
+                  {busyLabel ?? "Opening the design…"}
+                </p>
+                {typeof busyProgress === "number" ? (
+                  <div className="mt-2 h-1 overflow-hidden rounded-full bg-zinc-200">
+                    <div
+                      className="h-full rounded-full bg-zinc-800 transition-[width] duration-150"
+                      style={{ width: `${Math.max(4, Math.min(1, busyProgress) * 100)}%` }}
+                    />
+                  </div>
+                ) : null}
               </div>
             </div>
           ) : null}
@@ -367,7 +385,7 @@ export default function RingViewer({
           {isDragging ? (
             <div className="pointer-events-none absolute inset-4 flex items-center justify-center rounded-xl border-2 border-dashed border-zinc-900/40 bg-white/50 backdrop-blur-[1px]">
               <p className="text-base font-medium text-zinc-800">
-                {onFiles ? "Release to add to this session" : "Release to load model"}
+                {onFiles ? "Release to add these designs" : "Release to open this design"}
               </p>
             </div>
           ) : null}

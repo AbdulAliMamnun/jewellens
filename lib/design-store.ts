@@ -1,5 +1,6 @@
 import { create } from "zustand";
 
+import { postJson } from "@/lib/api-call";
 import { designStepResultSchema } from "@/lib/design-step";
 import {
   DEFAULT_RING_PARAMS,
@@ -32,11 +33,14 @@ interface DesignStore {
   /** Values the clamp had to correct on the last step. */
   adjusted: { field: string; requested: string; applied: string }[];
   error: string | null;
+  /** The last thing asked for, so a failed turn can be retried in one click. */
+  lastMessage: string | null;
 
   /** Manual control edits. Same entry point the chat ends up at. */
   updateParams: (patch: Partial<RingParams>) => void;
   resetParams: () => void;
   sendMessage: (text: string) => Promise<void>;
+  retryLastMessage: () => Promise<void>;
   clearChanged: () => void;
   dismissUnhandled: () => void;
   dismissError: () => void;
@@ -55,6 +59,7 @@ export const useDesignStore = create<DesignStore>((set, get) => ({
   unhandled: [],
   adjusted: [],
   error: null,
+  lastMessage: null,
 
   updateParams: (patch) =>
     set((state) => ({
@@ -63,7 +68,32 @@ export const useDesignStore = create<DesignStore>((set, get) => ({
       changed: [],
     })),
 
-  resetParams: () => set({ params: DEFAULT_RING_PARAMS, changed: [] }),
+  /** Also the demo reset: the designer goes back to a blank conversation. */
+  resetParams: () =>
+    set({
+      params: DEFAULT_RING_PARAMS,
+      changed: [],
+      messages: [],
+      unhandled: [],
+      adjusted: [],
+      error: null,
+      lastMessage: null,
+      pending: false,
+    }),
+
+  /** Re-sends the last thing asked for, without retyping it. */
+  retryLastMessage: async () => {
+    const last = get().lastMessage;
+    if (!last) return;
+    set((state) => ({
+      // Drop the failed turn so the transcript doesn't show it twice.
+      messages: state.messages.filter(
+        (message, index) =>
+          !(index === state.messages.length - 1 && message.content === last),
+      ),
+    }));
+    await get().sendMessage(last);
+  },
 
   clearChanged: () => set({ changed: [] }),
   dismissUnhandled: () => set({ unhandled: [] }),
@@ -88,28 +118,19 @@ export const useDesignStore = create<DesignStore>((set, get) => ({
       changed: [],
       unhandled: [],
       adjusted: [],
+      lastMessage: trimmed,
     }));
 
     try {
-      const response = await fetch("/api/design-step", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ currentParams, userMessage: trimmed, briefHistory }),
+      const payload = await postJson<unknown>("/api/design-step", {
+        currentParams,
+        userMessage: trimmed,
+        briefHistory,
       });
-
-      const payload: unknown = await response.json().catch(() => null);
-
-      if (!response.ok) {
-        const message =
-          payload && typeof payload === "object" && "error" in payload
-            ? String((payload as { error: unknown }).error)
-            : `Design step failed (${response.status}).`;
-        throw new Error(message);
-      }
 
       const parsed = designStepResultSchema.safeParse(payload);
       if (!parsed.success) {
-        throw new Error("The designer returned an unexpected response.");
+        throw new Error("That answer came back garbled — try again.");
       }
 
       set((state) => ({
@@ -131,7 +152,8 @@ export const useDesignStore = create<DesignStore>((set, get) => ({
     } catch (cause) {
       set({
         pending: false,
-        error: cause instanceof Error ? cause.message : "Something went wrong.",
+        error:
+          cause instanceof Error ? cause.message : "That didn't go through — try again.",
       });
     }
   },
